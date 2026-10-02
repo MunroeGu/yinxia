@@ -31,10 +31,9 @@
     <string name="action_cancel">取消</string>
     <string name="action_select_all">全选</string>
     <string name="action_delete">删除</string>
+    <string name="action_done">完成</string>
     <string name="action_sort">排序方式</string>
     <string name="action_scan_range">扫描范围</string>
-    <string name="action_move_up">上移</string>
-    <string name="action_move_down">下移</string>
     <string name="selected_count">已选 %1$d 首</string>
     <string name="state_no_result">没有匹配的歌曲</string>
 
@@ -44,8 +43,9 @@
     <string name="sort_title_desc">名称（Z → A）</string>
     <string name="sort_date_desc">添加时间（新 → 旧）</string>
     <string name="sort_date_asc">添加时间（旧 → 新）</string>
-    <string name="sort_manual">手动排序</string>
-    <string name="manual_sort_hint">手动排序：点每行右侧的箭头调整顺序</string>
+    <string name="sort_manual">手动排序（拖动调整）</string>
+    <string name="manual_sort_title">拖动调整顺序</string>
+    <string name="manual_sort_hint">长按任意一行，上下拖动即可调整顺序；拖到屏幕边缘会自动滚动</string>
 
     <string name="folder_title">扫描范围</string>
     <string name="folder_message">只扫描勾选的文件夹。全部勾选时等于扫描整个设备。</string>

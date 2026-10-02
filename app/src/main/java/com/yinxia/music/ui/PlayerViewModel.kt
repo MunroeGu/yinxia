@@ -40,6 +40,11 @@ data class LibraryUiState(
     val loading: Boolean = true,
     val sortMode: SortMode = SortMode.TITLE,
     val sortAscending: Boolean = true,
+    /**
+     * 是否处在「手动排序」的拖动状态。
+     * 退出后手动顺序依然生效，只是列表恢复成普通形态，不再显示任何拖拽相关的东西。
+     */
+    val manualEditing: Boolean = false,
     /** false = 扫描全部文件夹；此时界面上的勾选一律显示为全选 */
     val folderFilterEnabled: Boolean = false,
     val selectedFolders: Set<String> = emptySet(),
@@ -318,35 +323,60 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setSortMode(mode: SortMode, ascending: Boolean) {
         preferences.sortMode = mode
         preferences.sortAscending = ascending
-        _library.update { it.copy(sortMode = mode, sortAscending = ascending) }
+        _library.update {
+            it.copy(sortMode = mode, sortAscending = ascending, manualEditing = false)
+        }
         recompute()
     }
 
+    /** 进入手动排序：列表变成可长按拖动；同时退出多选，避免两种模式打架 */
+    fun startManualSort() {
+        preferences.sortMode = SortMode.MANUAL
+        _library.update {
+            it.copy(
+                sortMode = SortMode.MANUAL,
+                manualEditing = true,
+                selectionMode = false,
+                selectedSongIds = emptySet(),
+            )
+        }
+        recompute()
+    }
+
+    /** 结束手动排序：顺序保留，退出拖动状态 */
+    fun finishManualSort() {
+        commitManualOrder()
+        _library.update { it.copy(manualEditing = false) }
+    }
+
     /**
-     * 手动把一首歌上移/下移一格。
+     * 拖动排序：把 [draggedId] 插到 [targetId] 当前所在的位置。
      *
-     * 用"当前显示顺序 + 其余歌曲原顺序"重建整份手动顺序：
-     * 这样即使开着搜索或只扫描了部分文件夹，也不会把没显示的歌曲顺序搞乱。
+     * 拖动时每跨过一行就会调用一次，所以这里刻意不做整表重算、也不写磁盘，
+     * 只改内存里的展示列表和手动顺序，松手时再由 [commitManualOrder] 落盘。
      */
-    fun moveSong(songId: Long, delta: Int) {
+    fun moveSongTo(draggedId: Long, targetId: Long) {
         val displayed = _library.value.songs.toMutableList()
-        val index = displayed.indexOfFirst { it.id == songId }
-        val target = index + delta
-        if (index < 0 || target < 0 || target >= displayed.size) return
+        val from = displayed.indexOfFirst { it.id == draggedId }
+        val to = displayed.indexOfFirst { it.id == targetId }
+        if (from < 0 || to < 0 || from == to) return
 
-        val moved = displayed[index]
-        displayed[index] = displayed[target]
-        displayed[target] = moved
+        displayed.add(to, displayed.removeAt(from))
 
+        // 用"当前显示顺序 + 没显示出来的歌曲原顺序"重建整份手动顺序，
+        // 这样即使开着搜索或只扫描了部分文件夹，也不会把没显示的歌曲搞乱
         val displayedIds = displayed.mapTo(HashSet()) { it.id }
         manualOrder = (
             displayed.map { it.id } + manualOrder.filter { it !in displayedIds }
             ).toMutableList()
+
+        _library.update { it.copy(sortMode = SortMode.MANUAL, songs = displayed) }
+    }
+
+    /** 把当前手动顺序写进 SharedPreferences */
+    fun commitManualOrder() {
         preferences.manualOrder = manualOrder
         preferences.sortMode = SortMode.MANUAL
-
-        _library.update { it.copy(sortMode = SortMode.MANUAL) }
-        recompute()
     }
 
     // -------------------------------------------------------- 扫描范围

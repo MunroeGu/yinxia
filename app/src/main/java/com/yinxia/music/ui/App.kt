@@ -1,6 +1,7 @@
 package com.yinxia.music.ui
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,6 +67,14 @@ fun YinxiaApp(
     var showFolderSheet by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
+    // 多选/拖动是"模式"，按返回键应该先退出模式而不是退出 App
+    BackHandler(enabled = library.selectionMode || library.manualEditing) {
+        when {
+            library.selectionMode -> viewModel.clearSelection()
+            else -> viewModel.finishManualSort()
+        }
+    }
+
     // 启动就连播放服务；拿到权限后（或用户刚授权回来）扫描一次
     LaunchedEffect(Unit) { viewModel.connectPlayer() }
     LaunchedEffect(permissionGranted) {
@@ -82,7 +91,8 @@ fun YinxiaApp(
 
     // 正在播放的歌可能被扫描范围过滤掉了，所以从全量列表里找
     val currentSong = library.allSongs.firstOrNull { it.id == playback.currentSongId }
-    val manualSorting = library.sortMode == SortMode.MANUAL
+    // 只有"进入拖动状态"时列表才是可排序的；平时即便排序方式是手动，也不显示任何多余控件
+    val manualSorting = library.manualEditing
 
     Scaffold(
         topBar = {
@@ -114,6 +124,16 @@ fun YinxiaApp(
                                     painter = painterResource(R.drawable.ic_delete),
                                     contentDescription = stringResource(R.string.action_delete),
                                 )
+                            }
+                        },
+                    )
+                } else if (library.manualEditing) {
+                    // 排序模式：只留一个「完成」，行内不加任何图标，避免遮挡歌曲信息
+                    TopAppBar(
+                        title = { Text(stringResource(R.string.manual_sort_title)) },
+                        actions = {
+                            TextButton(onClick = viewModel::finishManualSort) {
+                                Text(stringResource(R.string.action_done))
                             }
                         },
                     )
@@ -168,7 +188,7 @@ fun YinxiaApp(
                         },
                     )
 
-                    if (permissionGranted && manualSorting) {
+                    if (permissionGranted && library.manualEditing) {
                         Text(
                             text = stringResource(R.string.manual_sort_hint),
                             style = MaterialTheme.typography.labelMedium,
@@ -239,7 +259,7 @@ fun YinxiaApp(
                     isPlaying = playback.isPlaying,
                     selectionMode = library.selectionMode,
                     selectedIds = library.selectedSongIds,
-                    manualSorting = manualSorting,
+                    sorting = manualSorting,
                     onSongClick = viewModel::playSong,
                     onSongLongClick = { song ->
                         if (library.selectionMode) {
@@ -249,8 +269,8 @@ fun YinxiaApp(
                         }
                     },
                     onToggleSelection = { song -> viewModel.toggleSelection(song.id) },
-                    onMoveUp = { song -> viewModel.moveSong(song.id, -1) },
-                    onMoveDown = { song -> viewModel.moveSong(song.id, 1) },
+                    onMoveSong = viewModel::moveSongTo,
+                    onDragFinished = viewModel::commitManualOrder,
                     contentPadding = PaddingValues(bottom = 8.dp),
                 )
             }
@@ -262,7 +282,12 @@ fun YinxiaApp(
             sortMode = library.sortMode,
             sortAscending = library.sortAscending,
             onSelect = { mode, ascending ->
-                viewModel.setSortMode(mode, ascending)
+                if (mode == SortMode.MANUAL) {
+                    // 手动排序要先进入拖动状态，而不是仅切换排序字段
+                    viewModel.startManualSort()
+                } else {
+                    viewModel.setSortMode(mode, ascending)
+                }
                 showSortSheet = false
             },
             onDismiss = { showSortSheet = false },
