@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">音匣</string>
+
+    <string name="library_title">音乐库</string>
+    <string name="search_hint">搜索歌曲、歌手或专辑</string>
+    <string name="songs_count">共 %1$d 首</string>
+
+    <string name="permission_title">需要读取本地音乐</string>
+    <string name="permission_message">授予权限后即可扫描并播放手机里的音频文件。所有内容都在你的设备上，不会上传。</string>
+    <string name="permission_grant">授予权限</string>
+    <string name="permission_settings">去系统设置开启</string>
+
+    <string name="state_loading">正在扫描本地音乐…</string>
+    <string name="state_empty">没有找到音乐</string>
+    <string name="state_empty_hint">把音频文件放进手机存储后再试试</string>
+
+    <string name="unknown_artist">未知歌手</string>
+    <string name="action_refresh">重新扫描</string>
+    <string name="action_close">收起</string>
+    <string name="action_play">播放</string>
+    <string name="action_pause">暂停</string>
+    <string name="action_next">下一首</string>
+    <string name="action_previous">上一首</string>
+    <string name="action_shuffle">随机播放</string>
+    <string name="action_repeat">循环模式</string>
+    <string name="now_playing">正在播放</string>
+</resources>
