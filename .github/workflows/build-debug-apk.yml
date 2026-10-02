@@ -25,8 +25,25 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
+      # Gradle 的完整日志很大，GitHub 会把整个步骤的日志截断
+      #（"This step has been truncated due to its large size"），
+      # 而截断掉的正好是最前面、最关键的报错行。
+      # 所以：完整日志写进文件，stdout 只输出关键行，保证报错一定看得见。
+      # 同时把前几条错误以 annotation 上报，这样即使日志仍被截断也能从 API 读到。
       - name: Build
-        run: gradle assembleDebug --stacktrace
+        run: |
+          set +e
+          gradle assembleDebug --stacktrace > build-log.txt 2>&1
+          status=$?
+          echo "===== 关键报错行 ====="
+          grep -nE "^e: |^error: |Unresolved reference|Type mismatch|None of the following|What went wrong|Execution failed|> Task .*FAILED" build-log.txt | head -60
+          echo "===== 日志末尾 30 行 ====="
+          tail -n 30 build-log.txt
+          grep -E "^e: " build-log.txt | head -5 | while IFS= read -r line; do
+            echo "::error title=Kotlin compile error::$line"
+          done
+          echo "===== 构建退出码: $status ====="
+          exit $status
 
       # v4 跑在 node20 上（已被 GitHub 标记废弃），v7 跑在 node24；三个输入名都没变
       - name: Upload APK
