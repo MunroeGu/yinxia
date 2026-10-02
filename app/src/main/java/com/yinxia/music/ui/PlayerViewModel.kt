@@ -1,12 +1,18 @@
 package com.yinxia.music.ui
 
 import android.app.Application
+import android.net.Uri
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import com.yinxia.music.R
+import com.yinxia.music.data.FolderEntry
+import com.yinxia.music.data.LibraryPreferences
 import com.yinxia.music.data.MusicRepository
 import com.yinxia.music.data.Song
+import com.yinxia.music.data.SortMode
 import com.yinxia.music.player.PlaybackConnection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,13 +26,25 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 const val NO_SONG_ID = -1L
 
 data class LibraryUiState(
+    /** 过滤 + 排序后的结果，界面直接显示它，同时它就是播放队列 */
     val songs: List<Song> = emptyList(),
+    /** 扫描到的全部歌曲，「全选」和文件夹汇总要用 */
+    val allSongs: List<Song> = emptyList(),
+    val folders: List<FolderEntry> = emptyList(),
     val query: String = "",
     val loading: Boolean = true,
+    val sortMode: SortMode = SortMode.TITLE,
+    val sortAscending: Boolean = true,
+    /** false = 扫描全部文件夹；此时界面上的勾选一律显示为全选 */
+    val folderFilterEnabled: Boolean = false,
+    val selectedFolders: Set<String> = emptySet(),
+    val selectionMode: Boolean = false,
+    val selectedSongIds: Set<Long> = emptySet(),
 )
 
 data class PlaybackUiState(
@@ -55,16 +73,34 @@ data class PlaybackUiState(
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MusicRepository(application)
+    private val preferences = LibraryPreferences(application)
     private val connection = PlaybackConnection(application)
 
     // 自带作用域，不依赖 lifecycle-viewmodel-ktx，onCleared 里统一取消
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private val _library = MutableStateFlow(LibraryUiState())
+    /** 手动排序顺序，常驻内存免得每次重排都读一遍 SharedPreferences */
+    private var manualOrder: MutableList<Long> = preferences.manualOrder.toMutableList()
+
+    /** 等待系统删除确认的歌曲，删除结果回来后要用 */
+    private var pendingDeleteSongs: List<Song> = emptyList()
+
+    private val _library = MutableStateFlow(
+        LibraryUiState(
+            sortMode = preferences.sortMode,
+            sortAscending = preferences.sortAscending,
+            folderFilterEnabled = preferences.folderFilterEnabled,
+            selectedFolders = preferences.selectedFolders,
+        ),
+    )
     val library: StateFlow<LibraryUiState> = _library.asStateFlow()
 
     private val _playback = MutableStateFlow(PlaybackUiState())
     val playback: StateFlow<PlaybackUiState> = _playback.asStateFlow()
+
+    /** 需要交给系统弹确认框的删除请求 */
+    private val _pendingDelete = MutableStateFlow<List<Song>>(emptyList())
+    val pendingDelete: StateFlow<List<Song>> = _pendingDelete.asStateFlow()
 
     private var progressJob: Job? = null
 
@@ -83,6 +119,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = syncPlayback()
     }
 
+    // ---------------------------------------------------------------- 播放
+
     fun connectPlayer() {
         connection.connect { controller ->
             controller.addListener(playerListener)
@@ -91,19 +129,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun loadLibrary() {
-        scope.launch {
-            _library.update { it.copy(loading = true) }
-            val songs = repository.loadSongs()
-            _library.update { it.copy(songs = songs, loading = false) }
-        }
-    }
-
-    fun setQuery(query: String) {
-        _library.update { it.copy(query = query) }
-    }
-
-    /** 点列表里的一首歌：整个列表作为播放队列，从这首开始。 */
+    /** 点列表里的一首歌：当前显示的整个列表作为播放队列 */
     fun playSong(song: Song) {
         val controller = connection.controller ?: return
         val queue = _library.value.songs
@@ -178,7 +204,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val currentSongId = controller.currentMediaItem?.mediaId?.toLongOrNull() ?: NO_SONG_ID
         val playerDuration = controller.duration
         // 播放器还没解析出时长时，用扫描时拿到的时长兜底，进度条不会突然跳成 0
-        val fallbackDuration = _library.value.songs
+        val fallbackDuration = _library.value.allSongs
             .firstOrNull { it.id == currentSongId }
             ?.durationMs
             ?: 0L
@@ -209,6 +235,235 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 .build(),
         )
         .build()
+
+    // ------------------------------------------------------------ 音乐库
+
+    fun loadLibrary() {
+        scope.launch {
+            _library.update { it.copy(loading = true) }
+            val songs = repository.loadSongs()
+            syncManualOrder(songs)
+            _library.update {
+                it.copy(
+                    allSongs = songs,
+                    folders = MusicRepository.buildFolders(songs),
+                    loading = false,
+                )
+            }
+            recompute()
+        }
+    }
+
+    /**
+     * 让手动顺序覆盖到刚扫到的歌曲：新歌按名称追加在末尾，已删除的 id 清掉。
+     * 这样用户没手动排过的时候，手动模式也是一个合理的初始顺序。
+     */
+    private fun syncManualOrder(all: List<Song>) {
+        val validIds = all.mapTo(HashSet()) { it.id }
+        val removed = manualOrder.removeAll { it !in validIds }
+
+        val known = manualOrder.toHashSet()
+        val added = all.asSequence()
+            .filter { it.id !in known }
+            .sortedBy { it.title.lowercase() }
+            .map { it.id }
+            .toList()
+        if (added.isNotEmpty()) manualOrder.addAll(added)
+
+        if (removed || added.isNotEmpty()) preferences.manualOrder = manualOrder
+    }
+
+    /** 按 扫描范围 -> 搜索词 -> 排序 重新算出展示列表 */
+    private fun recompute() {
+        val state = _library.value
+        val query = state.query.trim()
+
+        val filtered = state.allSongs.filter { song ->
+            val folderOk = !state.folderFilterEnabled || song.folderKey in state.selectedFolders
+            val queryOk = query.isEmpty() ||
+                song.title.contains(query, ignoreCase = true) ||
+                song.artist?.contains(query, ignoreCase = true) == true ||
+                song.album?.contains(query, ignoreCase = true) == true
+            folderOk && queryOk
+        }
+
+        val ordered = when (state.sortMode) {
+            SortMode.TITLE -> filtered.sortedBy { it.title.lowercase() }
+
+            SortMode.DATE_ADDED -> filtered.sortedBy { it.dateAddedMs }
+
+            SortMode.MANUAL -> {
+                val orderIndex = manualOrder.withIndex().associate { (index, id) -> id to index }
+                filtered.sortedWith(
+                    compareBy<Song>({ orderIndex[it.id] ?: Int.MAX_VALUE }, { it.title.lowercase() }),
+                )
+            }
+        }
+
+        // 手动顺序自带方向，不再额外反转
+        val displayed = if (state.sortMode == SortMode.MANUAL || state.sortAscending) {
+            ordered
+        } else {
+            ordered.reversed()
+        }
+
+        _library.update { it.copy(songs = displayed) }
+    }
+
+    fun setQuery(query: String) {
+        _library.update { it.copy(query = query) }
+        recompute()
+    }
+
+    fun setSortMode(mode: SortMode, ascending: Boolean) {
+        preferences.sortMode = mode
+        preferences.sortAscending = ascending
+        _library.update { it.copy(sortMode = mode, sortAscending = ascending) }
+        recompute()
+    }
+
+    /**
+     * 手动把一首歌上移/下移一格。
+     *
+     * 用"当前显示顺序 + 其余歌曲原顺序"重建整份手动顺序：
+     * 这样即使开着搜索或只扫描了部分文件夹，也不会把没显示的歌曲顺序搞乱。
+     */
+    fun moveSong(songId: Long, delta: Int) {
+        val displayed = _library.value.songs.toMutableList()
+        val index = displayed.indexOfFirst { it.id == songId }
+        val target = index + delta
+        if (index < 0 || target < 0 || target >= displayed.size) return
+
+        val moved = displayed[index]
+        displayed[index] = displayed[target]
+        displayed[target] = moved
+
+        val displayedIds = displayed.mapTo(HashSet()) { it.id }
+        manualOrder = (
+            displayed.map { it.id } + manualOrder.filter { it !in displayedIds }
+            ).toMutableList()
+        preferences.manualOrder = manualOrder
+        preferences.sortMode = SortMode.MANUAL
+
+        _library.update { it.copy(sortMode = SortMode.MANUAL) }
+        recompute()
+    }
+
+    // -------------------------------------------------------- 扫描范围
+
+    fun setFolderSelected(folderKey: String, selected: Boolean) {
+        val allKeys = _library.value.folders.mapTo(HashSet()) { it.key }
+        if (allKeys.isEmpty()) return
+
+        val current = if (_library.value.folderFilterEnabled) {
+            _library.value.selectedFolders.toMutableSet()
+        } else {
+            allKeys.toMutableSet()
+        }
+        if (selected) current += folderKey else current -= folderKey
+
+        // 全部勾选等价于不限制，直接关掉过滤，避免存一份没意义的全集
+        val scanningAll = current.size == allKeys.size && current.containsAll(allKeys)
+
+        preferences.folderFilterEnabled = !scanningAll
+        preferences.selectedFolders = current
+        _library.update {
+            it.copy(folderFilterEnabled = !scanningAll, selectedFolders = current)
+        }
+        recompute()
+    }
+
+    fun scanAllFolders() {
+        preferences.folderFilterEnabled = false
+        preferences.selectedFolders = emptySet()
+        _library.update { it.copy(folderFilterEnabled = false, selectedFolders = emptySet()) }
+        recompute()
+    }
+
+    // ------------------------------------------------------------ 多选
+
+    fun startSelection(songId: Long) {
+        _library.update { it.copy(selectionMode = true, selectedSongIds = setOf(songId)) }
+    }
+
+    fun toggleSelection(songId: Long) {
+        val current = _library.value.selectedSongIds
+        val next = if (songId in current) current - songId else current + songId
+        _library.update { it.copy(selectionMode = next.isNotEmpty(), selectedSongIds = next) }
+    }
+
+    fun selectAllVisible() {
+        _library.update { it.copy(selectedSongIds = it.songs.mapTo(HashSet()) { song -> song.id }) }
+    }
+
+    fun clearSelection() {
+        _library.update { it.copy(selectionMode = false, selectedSongIds = emptySet()) }
+    }
+
+    // ------------------------------------------------------------ 删除
+
+    fun requestDeleteSelection() {
+        val selected = _library.value.allSongs.filter { it.id in _library.value.selectedSongIds }
+        if (selected.isEmpty()) return
+        pendingDeleteSongs = selected
+        _pendingDelete.value = selected
+    }
+
+    /** 界面已经拿去发起删除请求了，清掉状态避免重复触发；结果由 onDeleteResult 收尾 */
+    fun consumeDeleteRequest() {
+        _pendingDelete.value = emptyList()
+    }
+
+    /** 系统确认框的结果（或低版本直接删除的结果） */
+    fun onDeleteResult(success: Boolean) {
+        val deleted = pendingDeleteSongs
+        pendingDeleteSongs = emptyList()
+        _pendingDelete.value = emptyList()
+        if (!success || deleted.isEmpty()) return
+
+        removeDeletedFromQueue(deleted.mapTo(HashSet()) { it.id })
+        clearSelection()
+        loadLibrary()
+    }
+
+    /**
+     * Android 10 及以下没有 createDeleteRequest，只能直接删：
+     * 9 及以下需要 WRITE_EXTERNAL_STORAGE；10 可能抛 RecoverableSecurityException，这里按失败处理。
+     */
+    fun deleteDirectly(uris: List<Uri>) {
+        scope.launch {
+            val anyDeleted = withContext(Dispatchers.IO) {
+                var any = false
+                uris.forEach { uri ->
+                    try {
+                        if (getApplication<Application>().contentResolver.delete(uri, null, null) > 0) {
+                            any = true
+                        }
+                    } catch (_: Throwable) {
+                        // 权限不足或文件被占用；下面统一报失败
+                    }
+                }
+                any
+            }
+            if (!anyDeleted) {
+                Toast.makeText(
+                    getApplication<Application>(),
+                    R.string.delete_failed,
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            onDeleteResult(anyDeleted)
+        }
+    }
+
+    private fun removeDeletedFromQueue(deletedIds: Set<Long>) {
+        val controller = connection.controller ?: return
+        // 倒着删，避免索引位移
+        for (index in controller.mediaItemCount - 1 downTo 0) {
+            val id = controller.getMediaItemAt(index).mediaId.toLongOrNull()
+            if (id != null && id in deletedIds) controller.removeMediaItem(index)
+        }
+    }
 
     override fun onCleared() {
         connection.controller?.removeListener(playerListener)
