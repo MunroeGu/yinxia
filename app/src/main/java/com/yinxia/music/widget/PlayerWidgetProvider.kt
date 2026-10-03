@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.Player
 import com.yinxia.music.player.PlaybackConnection
+import com.yinxia.music.player.PlaybackService
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +58,11 @@ class PlayerWidgetProvider : AppWidgetProvider() {
     }
 
     private fun refreshFromService(context: Context) {
+        // ⚠️ 服务活着时**不要**为了"读一下状态"去连控制器：那个临时控制器断开时
+        // 有可能成为压垮会话的最后一根稻草（见 handleCommand 的说明）。
+        // 存下来的状态 + App / 服务的主动推送已经足够准确。
+        if (PlaybackService.isRunning) return
+
         withConnection(context) { controller ->
             PlayerWidget.updateAll(
                 context = context,
@@ -69,9 +75,14 @@ class PlayerWidgetProvider : AppWidgetProvider() {
     }
 
     private fun handleCommand(context: Context, action: String) {
-        // 先给一个立刻的视觉反馈，这一步完全不连服务：
-        // 图标翻了说明广播送到了我们进程（问题在命令那一段）；
-        // 图标纹丝不动说明点击根本没送到这个 receiver。
+        // 服务活着 → 命令由 PlaybackService 进程内的接收器执行：同一进程、不 bind、
+        // 不建控制器，所以不会像以前那样把服务和 App 进程一起弄停。
+        //
+        // ⚠️ 同一个广播两个接收器都会收到，顺序没有保证，所以这里必须先返回，
+        // 不能顺手做乐观翻转 —— 否则可能把服务推上来的真实状态又改错。
+        if (PlaybackService.isRunning) return
+
+        // 服务不在（App 从未启动过 / 队列已清空）才走兜底路径：先给一个立刻的视觉反馈
         if (action == ACTION_TOGGLE) PlayerWidget.toggleIconOptimistically(context)
 
         withConnection(context) { controller ->

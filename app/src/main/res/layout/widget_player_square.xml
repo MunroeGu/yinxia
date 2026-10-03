@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   接近正方形的插件用竖排：封面 / 歌名 / 歌手 / 一排等宽按钮。
-  封面用 weight 吃掉剩余高度 —— 尺寸小的时候它自己缩小，其余元素固定，
-  所以这个布局在任何高度下都不可能被裁掉（用户反馈 2x2 时内容被遮挡，就是被裁掉了）。
+  封面是**固定正方形**（56dp），上下各放一个可伸缩的 View 吸收多余高度 ——
+  这样封面永远不会被拉成长方形（之前用 weight 撑高封面，方图被裁成竖条，看起来像被拉长）。
+  注意 RemoteViews 不允许 android.widget.Space，所以占位用普通 View。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -13,12 +14,15 @@
     android:orientation="vertical"
     android:padding="8dp">
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
     <ImageView
         android:id="@+id/widget_cover"
-        android:layout_width="48dp"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:minHeight="24dp"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
         android:scaleType="centerCrop"
         android:src="@drawable/widget_cover_placeholder" />
 
@@ -26,7 +30,7 @@
         android:id="@+id/widget_title"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="5dp"
         android:ellipsize="end"
         android:gravity="center"
         android:maxLines="1"
@@ -89,4 +93,9 @@
             android:src="@drawable/ic_skip_next"
             android:tint="@color/widget_icon" />
     </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
 </LinearLayout>

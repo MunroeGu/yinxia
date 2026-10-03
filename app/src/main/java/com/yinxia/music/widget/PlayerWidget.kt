@@ -48,24 +48,46 @@ object PlayerWidget {
      * 所以每秒两次的进度刷新不会造成重复推送。
      */
     fun push(context: Context, song: Song?, isPlaying: Boolean) {
+        pushState(
+            context = context,
+            title = song?.title,
+            artist = song?.artist,
+            isPlaying = isPlaying,
+            songId = song?.id ?: -1L,
+        )
+    }
+
+    /**
+     * 用拆散的字段推一次状态。
+     *
+     * 播放服务里只有 MediaItem、没有 Song 对象，所以服务处理完桌面按钮之后
+     * 由这个入口把真实状态推回插件（[push] 也是转调它）。
+     */
+    fun pushState(
+        context: Context,
+        title: String?,
+        artist: String?,
+        isPlaying: Boolean,
+        songId: Long,
+    ) {
         // 封面是几百毫秒后才解码好的，所以"这一首有没有封面"也要进签名：
         // 否则切歌那一瞬间的推送会把占位图发到桌面，而且之后再也不会重推真封面。
         // coverFor 在拿不到封面时不写缓存，所以后面再调用一次就能取到。
-        val cover = coverFor(song?.id)
+        val cover = coverFor(songId.takeIf { it > 0 })
 
         // 先把状态存下来。必须放在签名去重之前：即使这一次因为"没实质变化"不重推界面，
         // 插件下次重画（onUpdate / 拉伸尺寸）也要能拿到最新的歌名和播放状态。
         val preferences = com.yinxia.music.data.LibraryPreferences(context)
-        preferences.widgetTitle = song?.title
-        preferences.widgetArtist = song?.artist
+        preferences.widgetTitle = title
+        preferences.widgetArtist = artist
         preferences.widgetIsPlaying = isPlaying
-        preferences.widgetSongId = song?.id ?: -1L
+        preferences.widgetSongId = songId
 
-        val signature = "${song?.id}|${song?.title}|${song?.artist}|$isPlaying|${cover != null}"
+        val signature = "$songId|$title|$artist|$isPlaying|${cover != null}"
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getString(KEY_LAST_STATE, null) == signature) return
         prefs.edit().putString(KEY_LAST_STATE, signature).apply()
-        updateAll(context, song?.title, song?.artist, isPlaying, cover)
+        updateAll(context, title, artist, isPlaying, cover)
     }
 
     /**

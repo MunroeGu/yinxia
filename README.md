@@ -92,10 +92,13 @@
     两套布局**故意共用同一批 view id**，所以推送代码不需要按布局分叉。
     > 为什么从宽高比改成高度：同一个 2x2 在不同启动器上上报的宽高差得很远，算出来的比例一会儿横一会儿竖；
     > 而"高度不够，竖排的封面 + 文字 + 按钮就是叠不下"是确定的、跟启动器无关的问题。
-  - **竖排布局的封面会自己吸收多余高度。** `res/layout/widget_player_square.xml` 里封面写的是
-    `layout_height="0dp"` + `layout_weight="1"`，剩下的高度全归封面，插件变小时它就跟着缩小。
-    > 以前封面是固定高度，2x2 时整个竖排布局会被裁掉一截（用户反馈"内容还是被盖住了"）。
-    > 改用权重之后，"内容比插件本身高"这件事在物理上不可能发生了 —— 少掉的永远是封面，不会是按钮。
+  - **竖排布局的封面是固定的 56dp 正方形，多余高度由两个可伸缩的 `View` 吸收。**
+    `res/layout/widget_player_square.xml` 里封面写的是 `56dp` 正方形 + `scaleType="centerCrop"`，
+    上下各放一个 `<View android:layout_weight="1" />` 平分剩下的高度，
+    所以插件被拉高拉矮，封面形状都不变，2x2 也不会被裁掉内容。
+    > 这里改掉过一个真实的 bug：封面以前是 `layout_height="0dp"` + `weight="1"`，
+    > 正方形封面被撑成了一条窄窄的竖条，看起来就是"被拉长了"。
+    > 注意 `android.widget.Space` 不能出现在 RemoteViews 里，占位只能用普通 `View`。
   - **正方形尺寸被正式支持了。** `res/xml/player_widget_info.xml` 的 `minResizeWidth` 从 140dp 降到 **110dp**，
     所以 2x2 这种接近正方形的尺寸不再算"擦边"，是声明里就允许的尺寸。
   - **背景是半透明的，只留一圈发丝描边。** 由 `widget_background.xml` 配合
@@ -112,6 +115,25 @@
     > 为什么删：局部更新会重建那一个 view，而在部分启动器（MIUI）上重建后的 view 会丢掉自己的点击
     > `PendingIntent` —— 这正好对上用户报的"暂停能按，紧接着按播放就没反应"。
     > 整块重画会把每个 `PendingIntent` 重新注册一遍，比换一个图标贵一点，但按钮一定可点。
+  - **"按钮没反应"的第三个根因：插件命令以前是借一个临时 `MediaController` 发的。**
+    `PlayerWidgetProvider` 收到点击后自己 bind 一个 controller，执行完命令再多等 600ms 才 release
+    （`withConnection`）。App 已经在后台时，它自己的 controller 早就没了，
+    于是这个临时 controller 就是**最后一个** controller；一 release，MediaSession 的 controller 数归零，
+    播放服务和整个 App 进程会被一起拆掉。用户报的现象正是这样：
+    **按暂停，音乐确实停了，然后音乐就死了，再按别的键全都没反应，重新打开 App 是冷启动。**
+    > 这和以前那两个根因不一样：命令本身是送到了、也生效了，坏的是"发命令的人顺手把服务带走了"。
+  - **修法：正在跑的播放服务自己处理插件点击，全程在本进程内。**
+    `PlaybackService` 在 `onCreate` 里注册一个动态 `BroadcastReceiver` 监听
+    `ACTION_TOGGLE` / `ACTION_NEXT` / `ACTION_PREV`（`onDestroy` 里注销），
+    直接操作 `mediaSession.player`，再把真实状态用 `PlayerWidget.pushState(...)` 推回插件。
+    `PlayerWidgetProvider` 仍然先乐观地把播放/暂停图标翻一下（点击要立刻有反馈），
+    只有当 `PlaybackService.isRunning == false`（根本没有服务在跑，比如刚重启过、或者队列已经空了）
+    才退回连 controller 的那条老路。
+  - **同一轮修掉的第二个 bug：`PlaybackService.onTaskRemoved` 以前只要"没在播"就 `stopSelf()`。**
+    所以在**暂停**状态下把 App 从最近任务里划掉，服务和进程当场就没了，之后再点插件等于对着空气说话。
+    现在只有队列本身是空的时候（`player.mediaItemCount == 0`）才停，
+    暂停中的播放器会把服务和通知一起留着 —— 这和主流播放器行为一致，
+    也是"划掉 App 之后插件还能控制"的原因。
   - **播放队列能在进程被杀之后自己回来。** 以前队列只活在内存里，App 被划掉后插件按按钮等于对**空队列**下命令，
     表现就是"插件上的按钮全都没反应"。现在：`LibraryPreferences` 多了 `queueSongIds` + `queueIndex` 两个字段，
     `PlayerViewModel.playSong` / `persistQueueIndex()` 负责写入；`Song -> MediaItem` 的转换挪到了
@@ -121,6 +143,8 @@
     > 这是针对"按钮点了没反应"的一个**推断性修复**（没有在 MIUI 上实测过）：挂在根布局时，
     > MIUI 的桌面容易把根视图的点击当成整个插件的点击，顺手把子按钮的点击一起吃掉；
     > 移到封面之后，上一首 / 播放暂停 / 下一首这三个按钮的点击才有机会正常送达。
+  - **为什么这轮值得记**：这是"插件上的按钮没反应"找到的**第三个**根因，
+    和前两个不同，它有一个能观察到的症状（App 冷启动）做证据，不是猜的。
 
 **歌曲详细信息与歌单：**
 
