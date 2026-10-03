@@ -47,11 +47,15 @@ object PlayerWidget {
      * 所以每秒两次的进度刷新不会造成重复推送。
      */
     fun push(context: Context, song: Song?, isPlaying: Boolean) {
-        val signature = "${song?.id}|${song?.title}|${song?.artist}|$isPlaying"
+        // 封面是几百毫秒后才解码好的，所以"这一首有没有封面"也要进签名：
+        // 否则切歌那一瞬间的推送会把占位图发到桌面，而且之后再也不会重推真封面。
+        // coverOf 在拿不到封面时不写缓存，所以后面再调用一次就能取到。
+        val cover = coverOf(song)
+        val signature = "${song?.id}|${song?.title}|${song?.artist}|$isPlaying|${cover != null}"
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getString(KEY_LAST_STATE, null) == signature) return
         prefs.edit().putString(KEY_LAST_STATE, signature).apply()
-        updateAll(context, song?.title, song?.artist, isPlaying, coverOf(song))
+        updateAll(context, song?.title, song?.artist, isPlaying, cover)
     }
 
     fun updateAll(
@@ -65,7 +69,8 @@ object PlayerWidget {
         if (ids.isEmpty()) return
         val manager = AppWidgetManager.getInstance(context)
         ids.forEach { id ->
-            manager.updateAppWidget(id, buildViews(context, title, artist, isPlaying, cover))
+            val layoutRes = layoutFor(manager.getAppWidgetOptions(id))
+            manager.updateAppWidget(id, buildViews(context, title, artist, isPlaying, cover, layoutRes))
         }
     }
 
@@ -74,21 +79,26 @@ object PlayerWidget {
         val ids = widgetIds(context)
         if (ids.isEmpty()) return
         val manager = AppWidgetManager.getInstance(context)
-        val partial = RemoteViews(context.packageName, R.layout.widget_player).apply {
-            setImageViewResource(
-                R.id.widget_toggle,
-                if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play,
-            )
-            setContentDescription(
-                R.id.widget_toggle,
-                context.getString(if (isPlaying) R.string.action_pause else R.string.action_play),
-            )
-            setOnClickPendingIntent(
-                R.id.widget_toggle,
-                commandIntent(context, PlayerWidgetProvider.ACTION_TOGGLE, REQUEST_TOGGLE),
-            )
+        ids.forEach { id ->
+            val partial = RemoteViews(
+                context.packageName,
+                layoutFor(manager.getAppWidgetOptions(id)),
+            ).apply {
+                setImageViewResource(
+                    R.id.widget_toggle,
+                    if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play,
+                )
+                setContentDescription(
+                    R.id.widget_toggle,
+                    context.getString(if (isPlaying) R.string.action_pause else R.string.action_play),
+                )
+                setOnClickPendingIntent(
+                    R.id.widget_toggle,
+                    commandIntent(context, PlayerWidgetProvider.ACTION_TOGGLE, REQUEST_TOGGLE),
+                )
+            }
+            manager.partiallyUpdateAppWidget(id, partial)
         }
-        ids.forEach { id -> manager.partiallyUpdateAppWidget(id, partial) }
     }
 
     fun buildViews(
@@ -97,7 +107,8 @@ object PlayerWidget {
         artist: String?,
         isPlaying: Boolean,
         cover: Bitmap?,
-    ): RemoteViews = RemoteViews(context.packageName, R.layout.widget_player).apply {
+        layoutRes: Int,
+    ): RemoteViews = RemoteViews(context.packageName, layoutRes).apply {
         setTextViewText(R.id.widget_title, title ?: context.getString(R.string.app_name))
         setTextViewText(R.id.widget_artist, artist ?: context.getString(R.string.widget_idle))
 
@@ -128,7 +139,25 @@ object PlayerWidget {
             R.id.widget_next,
             commandIntent(context, PlayerWidgetProvider.ACTION_NEXT, REQUEST_NEXT),
         )
-        setOnClickPendingIntent(R.id.widget_root, openAppIntent(context))
+        // 注意：不要把"打开 App"挂在根布局上 —— 小米启动器会把它当成整块插件的点击，
+        // 子按钮的点击就收不到了（用户反馈的"按钮无响应"很可能就是这个）。
+        // 改成只有封面能点开 App。
+        setOnClickPendingIntent(R.id.widget_cover, openAppIntent(context))
+    }
+
+    /**
+     * 按插件当前尺寸挑布局：宽高比 >= 2 用横排，否则用竖排。
+     * 2x2 的宽高比接近 1，会走竖排 —— 横排的按钮在窄宽度下会被挤出可用区域。
+     */
+    fun layoutFor(options: android.os.Bundle): Int {
+        val minWidth = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+        val minHeight = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
+        if (minHeight <= 0) return R.layout.widget_player
+        return if (minWidth.toFloat() / minHeight >= 2f) {
+            R.layout.widget_player
+        } else {
+            R.layout.widget_player_square
+        }
     }
 
     private fun commandIntent(context: Context, action: String, requestCode: Int): PendingIntent {

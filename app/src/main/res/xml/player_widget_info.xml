@@ -10,7 +10,7 @@
     android:initialLayout="@layout/widget_player"
     android:minHeight="60dp"
     android:minResizeHeight="60dp"
-    android:minResizeWidth="140dp"
+    android:minResizeWidth="110dp"
     android:minWidth="180dp"
     android:previewLayout="@layout/widget_player"
     android:resizeMode="horizontal|vertical"

@@ -11,6 +11,7 @@ import com.yinxia.music.R
 import com.yinxia.music.data.FolderEntry
 import com.yinxia.music.data.LibraryPreferences
 import com.yinxia.music.data.MusicRepository
+import com.yinxia.music.data.Playlist
 import com.yinxia.music.data.Song
 import com.yinxia.music.data.SortMode
 import com.yinxia.music.player.PlaybackConnection
@@ -48,6 +49,12 @@ data class LibraryUiState(
     val manualEditing: Boolean = false,
     /** 用户自定义的默认主题色（ARGB）；null = 用主题自带颜色 */
     val defaultAccentArgb: Int? = null,
+    /** 是否在列表里显示码率/采样率这类详细信息 */
+    val showSongDetails: Boolean = false,
+    /** 自建歌单 */
+    val playlists: List<Playlist> = emptyList(),
+    /** 当前只看哪个歌单；null = 看全部 */
+    val activePlaylistId: Long? = null,
     /** false = 扫描全部文件夹；此时界面上的勾选一律显示为全选 */
     val folderFilterEnabled: Boolean = false,
     val selectedFolders: Set<String> = emptySet(),
@@ -100,6 +107,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             folderFilterEnabled = preferences.folderFilterEnabled,
             selectedFolders = preferences.selectedFolders,
             defaultAccentArgb = preferences.defaultAccentArgb,
+            showSongDetails = preferences.showSongDetails,
+            playlists = preferences.playlists,
         ),
     )
     val library: StateFlow<LibraryUiState> = _library.asStateFlow()
@@ -254,6 +263,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             _library.update { it.copy(loading = true) }
             val songs = repository.loadSongs()
             syncManualOrder(songs)
+            dropMissingSongsFromPlaylists(songs)
             _library.update {
                 it.copy(
                     allSongs = songs,
@@ -284,18 +294,44 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (removed || added.isNotEmpty()) preferences.manualOrder = manualOrder
     }
 
+    /**
+     * 歌曲被删掉后，把歌单里失效的 id 清掉，避免歌单里挂着永远播不了的条目。
+     */
+    private fun dropMissingSongsFromPlaylists(all: List<Song>) {
+        val validIds = all.mapTo(HashSet()) { it.id }
+        var changed = false
+        val cleaned = _library.value.playlists.map { playlist ->
+            val kept = playlist.songIds.filter { it in validIds }
+            if (kept.size != playlist.songIds.size) {
+                changed = true
+                playlist.copy(songIds = kept)
+            } else {
+                playlist
+            }
+        }
+        if (!changed) return
+        preferences.playlists = cleaned
+        _library.update { it.copy(playlists = cleaned) }
+    }
+
     /** 按 扫描范围 -> 搜索词 -> 排序 重新算出展示列表 */
     private fun recompute() {
         val state = _library.value
         val query = state.query.trim()
 
+        // 只看某个歌单时，按歌单里的 id 过滤；歌单里已经不存在的歌（被删了/不在扫描范围）自动忽略
+        val playlistSongIds = state.activePlaylistId
+            ?.let { active -> state.playlists.firstOrNull { it.id == active }?.songIds }
+            ?.toHashSet()
+
         val filtered = state.allSongs.filter { song ->
             val folderOk = !state.folderFilterEnabled || song.folderKey in state.selectedFolders
+            val playlistOk = playlistSongIds == null || song.id in playlistSongIds
             val queryOk = query.isEmpty() ||
                 song.title.contains(query, ignoreCase = true) ||
                 song.artist?.contains(query, ignoreCase = true) == true ||
                 song.album?.contains(query, ignoreCase = true) == true
-            folderOk && queryOk
+            folderOk && playlistOk && queryOk
         }
 
         val ordered = when (state.sortMode) {
@@ -330,6 +366,85 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setDefaultAccent(argb: Int?) {
         preferences.defaultAccentArgb = argb
         _library.update { it.copy(defaultAccentArgb = argb) }
+    }
+
+    /** 显示/隐藏歌曲详细信息（码率、采样率等） */
+    fun setShowSongDetails(show: Boolean) {
+        preferences.showSongDetails = show
+        _library.update { it.copy(showSongDetails = show) }
+    }
+
+    /** 只看某个歌单；传 null 表示看全部 */
+    fun setActivePlaylist(playlistId: Long?) {
+        _library.update { it.copy(activePlaylistId = playlistId) }
+        recompute()
+    }
+
+    /**
+     * 用当前选中的歌曲新建歌单（[songIds] 为空时只建一个空歌单）。
+     * 返回新歌单的 id。名称会去掉首尾空格，空名回退成"新建歌单"。
+     */
+    fun createPlaylist(name: String, songIds: List<Long>): Long {
+        val cleanName = name.trim().ifEmpty { "新建歌单" }
+        val playlists = _library.value.playlists.toMutableList()
+        // 用当前最大 id + 1，避免和已存在的撞号
+        val newId = (playlists.maxOfOrNull { it.id } ?: 0L) + 1L
+        playlists += Playlist(id = newId, name = cleanName, songIds = songIds.distinct())
+        applyPlaylists(playlists)
+        return newId
+    }
+
+    /** 把歌曲加入歌单（已经在里面的不重复加） */
+    fun addSongsToPlaylist(playlistId: Long, songIds: List<Long>) {
+        val playlists = _library.value.playlists.map { playlist ->
+            if (playlist.id == playlistId) {
+                playlist.copy(songIds = (playlist.songIds + songIds).distinct())
+            } else {
+                playlist
+            }
+        }
+        applyPlaylists(playlists)
+    }
+
+    /** 把歌曲从歌单里移除 */
+    fun removeSongsFromPlaylist(playlistId: Long, songIds: List<Long>) {
+        val removing = songIds.toHashSet()
+        val playlists = _library.value.playlists.map { playlist ->
+            if (playlist.id == playlistId) {
+                playlist.copy(songIds = playlist.songIds.filterNot { it in removing })
+            } else {
+                playlist
+            }
+        }
+        applyPlaylists(playlists)
+    }
+
+    fun renamePlaylist(playlistId: Long, name: String) {
+        val cleanName = name.trim().ifEmpty { return }
+        val playlists = _library.value.playlists.map { playlist ->
+            if (playlist.id == playlistId) playlist.copy(name = cleanName) else playlist
+        }
+        applyPlaylists(playlists)
+    }
+
+    fun deletePlaylist(playlistId: Long) {
+        val playlists = _library.value.playlists.filterNot { it.id == playlistId }
+        // 正在看这个歌单时，删掉后自动退回"全部"
+        val stillActive = _library.value.activePlaylistId == playlistId
+        if (stillActive) {
+            preferences.playlists = playlists
+            _library.update { it.copy(playlists = playlists, activePlaylistId = null) }
+            recompute()
+            return
+        }
+        applyPlaylists(playlists)
+    }
+
+    /** 歌单改动统一走这里：落盘 + 更新状态 + 重算列表 */
+    private fun applyPlaylists(playlists: List<Playlist>) {
+        preferences.playlists = playlists
+        _library.update { it.copy(playlists = playlists) }
+        recompute()
     }
 
     fun setSortMode(mode: SortMode, ascending: Boolean) {

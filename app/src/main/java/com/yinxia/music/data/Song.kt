@@ -20,4 +20,12 @@ data class Song(
     val folderName: String,
     /** MediaStore 记录的加入时间（毫秒） */
     val dateAddedMs: Long,
+    /** 码率（bps）。系统只在 Android 11+ 提供，取不到时为 null */
+    val bitrate: Int?,
+    /** 采样率（Hz）。系统只在 Android 16+（API 36）提供，取不到时为 null */
+    val sampleRate: Int?,
+    /** 文件大小（字节） */
+    val sizeBytes: Long,
+    /** MIME 类型，例如 audio/flac */
+    val mimeType: String?,
 )

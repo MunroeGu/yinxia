@@ -32,6 +32,17 @@ class PlayerWidgetProvider : AppWidgetProvider() {
         refreshFromService(context)
     }
 
+    override fun onAppWidgetOptionsChanged(
+        context: Context,
+        appWidgetManager: AppWidgetManager,
+        appWidgetId: Int,
+        newOptions: android.os.Bundle,
+    ) {
+        // 用户拉伸了插件：立刻按新尺寸重画一次，并顺手从播放服务取一次真实状态
+        super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
+        refreshFromService(context)
+    }
+
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
         when (val action = intent.action) {
@@ -100,10 +111,15 @@ class PlayerWidgetProvider : AppWidgetProvider() {
         val connection = PlaybackConnection(context)
         connection.connect { controller ->
             try {
+                // 先把要读的状态读完（block 内部会读 currentMediaItem / isPlaying）
                 block(controller)
             } finally {
-                connection.release()
-                finishOnce()
+                // 延迟一小会儿再断开：命令是转给播放服务后才生效的，立刻断开有丢掉它的风险。
+                // 放在 finally 里，block 抛异常时连接也不会泄漏（只靠下面 5 秒的兜底太晚）。
+                Handler(Looper.getMainLooper()).postDelayed({
+                    connection.release()
+                    finishOnce()
+                }, RELEASE_DELAY_MS)
             }
         }
         Handler(Looper.getMainLooper()).postDelayed({ finishOnce() }, TIMEOUT_MS)
@@ -114,5 +130,6 @@ class PlayerWidgetProvider : AppWidgetProvider() {
         const val ACTION_NEXT = "com.yinxia.music.widget.ACTION_NEXT"
         const val ACTION_PREV = "com.yinxia.music.widget.ACTION_PREV"
         private const val TIMEOUT_MS = 5000L
+        private const val RELEASE_DELAY_MS = 600L
     }
 }

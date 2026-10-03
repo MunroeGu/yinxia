@@ -48,6 +48,7 @@ import androidx.compose.ui.zIndex
 import com.yinxia.music.R
 import com.yinxia.music.data.Song
 import com.yinxia.music.util.formatDuration
+import com.yinxia.music.util.songDetailText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -72,6 +73,7 @@ fun LibraryScreen(
     selectionMode: Boolean,
     selectedIds: Set<Long>,
     sorting: Boolean,
+    showDetails: Boolean,
     onSongClick: (Song) -> Unit,
     onSongLongClick: (Song) -> Unit,
     onToggleSelection: (Song) -> Unit,
@@ -165,6 +167,7 @@ fun LibraryScreen(
                 selectionMode = selectionMode,
                 selected = song.id in selectedIds,
                 sorting = sorting,
+                showDetails = showDetails,
                 isDragging = isDragging,
                 dragOffsetY = if (isDragging) dragOffset else 0f,
                 onClick = { if (selectionMode) onToggleSelection(song) else onSongClick(song) },
@@ -232,6 +235,7 @@ private fun SongRow(
     selectionMode: Boolean,
     selected: Boolean,
     sorting: Boolean,
+    showDetails: Boolean,
     isDragging: Boolean,
     dragOffsetY: Float,
     onClick: () -> Unit,
@@ -298,6 +302,17 @@ private fun SongRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            val details = if (showDetails) songDetailText(song) else null
+            if (details != null) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = details,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
 
         // 排序模式下这里什么都不放：不放箭头，也不放拖拽把手，歌曲信息占满可用宽度

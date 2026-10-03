@@ -76,4 +76,21 @@
 
     <string name="widget_idle">未在播放</string>
     <string name="widget_description">显示当前歌曲并控制播放，可自由调整大小</string>
+
+    <string name="action_song_details">歌曲信息</string>
+    <string name="playlist_title">歌单</string>
+    <string name="playlist_all">全部</string>
+    <string name="playlist_new">新建歌单</string>
+    <string name="playlist_name_hint">歌单名称</string>
+    <string name="playlist_add_title">加入歌单</string>
+    <string name="playlist_add_selected">已选 %1$d 首</string>
+    <string name="playlist_create_and_add">新建并加入</string>
+    <string name="playlist_rename">重命名</string>
+    <string name="playlist_delete">删除歌单</string>
+    <string name="playlist_remove_selected">移出歌单</string>
+    <string name="playlist_delete_message">删除歌单「%1$s」？歌曲文件不会被删除。</string>
+    <string name="playlist_empty">这个歌单还没有歌曲</string>
+    <string name="playlist_empty_hint">在音乐库里长按歌曲，选「歌单」加进来</string>
+    <string name="action_confirm">确定</string>
+    <string name="action_save">保存</string>
 </resources>

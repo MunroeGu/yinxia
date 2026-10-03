@@ -47,6 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.yinxia.music.R
 import com.yinxia.music.data.ArtworkLoader
+import com.yinxia.music.data.Playlist
 import com.yinxia.music.data.SortMode
 import com.yinxia.music.ui.theme.AccentTheme
 import com.yinxia.music.ui.theme.accentForTheme
@@ -115,6 +116,10 @@ private fun YinxiaAppContent(
     var showFolderSheet by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showThemeSheet by remember { mutableStateOf(false) }
+    var showAddToPlaylist by remember { mutableStateOf(false) }
+    var showCreatePlaylist by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<Playlist?>(null) }
+    var actionsTarget by remember { mutableStateOf<Playlist?>(null) }
 
     // 多选/拖动是"模式"，按返回键应该先退出模式而不是退出 App
     BackHandler(enabled = library.selectionMode || library.manualEditing) {
@@ -167,6 +172,30 @@ private fun YinxiaAppContent(
                         actions = {
                             TextButton(onClick = viewModel::selectAllVisible) {
                                 Text(stringResource(R.string.action_select_all))
+                            }
+                            TextButton(
+                                onClick = {
+                                    val activeId = library.activePlaylistId
+                                    if (activeId != null) {
+                                        viewModel.removeSongsFromPlaylist(
+                                            activeId,
+                                            library.selectedSongIds.toList(),
+                                        )
+                                        viewModel.clearSelection()
+                                    } else {
+                                        showAddToPlaylist = true
+                                    }
+                                },
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (library.activePlaylistId != null) {
+                                            R.string.playlist_remove_selected
+                                        } else {
+                                            R.string.playlist_title
+                                        },
+                                    ),
+                                )
                             }
                             IconButton(onClick = { showDeleteConfirm = true }) {
                                 Icon(
@@ -244,6 +273,23 @@ private fun YinxiaAppContent(
                                         tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
+                                IconButton(
+                                    onClick = {
+                                        viewModel.setShowSongDetails(!library.showSongDetails)
+                                    },
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_info),
+                                        contentDescription = stringResource(
+                                            R.string.action_song_details,
+                                        ),
+                                        tint = if (library.showSongDetails) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
                             }
                         },
                     )
@@ -301,6 +347,25 @@ private fun YinxiaAppContent(
 
                 library.allSongs.isEmpty() -> EmptyPage(onRefresh = viewModel::loadLibrary)
 
+                library.activePlaylistId != null && library.songs.isEmpty() -> Column(
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    // 歌单为空时也要留下歌单条，否则用户没法切回「全部」
+                    PlaylistChips(
+                        playlists = library.playlists,
+                        activeId = library.activePlaylistId,
+                        onSelect = viewModel::setActivePlaylist,
+                        onLongPress = { actionsTarget = it },
+                        onCreateNew = { showCreatePlaylist = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    EmptyPage(
+                        onRefresh = viewModel::loadLibrary,
+                        title = stringResource(R.string.playlist_empty),
+                        hint = stringResource(R.string.playlist_empty_hint),
+                    )
+                }
+
                 library.songs.isEmpty() && library.folderFilterEnabled -> EmptyPage(
                     onRefresh = viewModel::loadLibrary,
                     title = stringResource(R.string.state_no_folder),
@@ -313,26 +378,37 @@ private fun YinxiaAppContent(
                     hint = null,
                 )
 
-                else -> LibraryScreen(
-                    songs = library.songs,
-                    currentSongId = playback.currentSongId,
-                    isPlaying = playback.isPlaying,
-                    selectionMode = library.selectionMode,
-                    selectedIds = library.selectedSongIds,
-                    sorting = manualSorting,
-                    onSongClick = viewModel::playSong,
-                    onSongLongClick = { song ->
-                        if (library.selectionMode) {
-                            viewModel.toggleSelection(song.id)
-                        } else {
-                            viewModel.startSelection(song.id)
-                        }
-                    },
-                    onToggleSelection = { song -> viewModel.toggleSelection(song.id) },
-                    onMoveSong = viewModel::moveSongTo,
-                    onDragFinished = viewModel::commitManualOrder,
-                    contentPadding = PaddingValues(bottom = 8.dp),
-                )
+                else -> Column(Modifier.fillMaxSize()) {
+                    PlaylistChips(
+                        playlists = library.playlists,
+                        activeId = library.activePlaylistId,
+                        onSelect = viewModel::setActivePlaylist,
+                        onLongPress = { actionsTarget = it },
+                        onCreateNew = { showCreatePlaylist = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    LibraryScreen(
+                        songs = library.songs,
+                        currentSongId = playback.currentSongId,
+                        isPlaying = playback.isPlaying,
+                        selectionMode = library.selectionMode,
+                        selectedIds = library.selectedSongIds,
+                        sorting = manualSorting,
+                        showDetails = library.showSongDetails,
+                        onSongClick = viewModel::playSong,
+                        onSongLongClick = { song ->
+                            if (library.selectionMode) {
+                                viewModel.toggleSelection(song.id)
+                            } else {
+                                viewModel.startSelection(song.id)
+                            }
+                        },
+                        onToggleSelection = { song -> viewModel.toggleSelection(song.id) },
+                        onMoveSong = viewModel::moveSongTo,
+                        onDragFinished = viewModel::commitManualOrder,
+                        contentPadding = PaddingValues(bottom = 8.dp),
+                    )
+                }
             }
         }
     }
@@ -401,6 +477,65 @@ private fun YinxiaAppContent(
                     Text(stringResource(R.string.action_cancel))
                 }
             },
+        )
+    }
+
+    if (showAddToPlaylist) {
+        AddToPlaylistSheet(
+            playlists = library.playlists,
+            selectedCount = library.selectedSongIds.size,
+            onCreate = { name ->
+                viewModel.createPlaylist(name, library.selectedSongIds.toList())
+                viewModel.clearSelection()
+                showAddToPlaylist = false
+            },
+            onPick = { id ->
+                viewModel.addSongsToPlaylist(id, library.selectedSongIds.toList())
+                viewModel.clearSelection()
+                showAddToPlaylist = false
+            },
+            onDismiss = { showAddToPlaylist = false },
+        )
+    }
+
+    if (showCreatePlaylist) {
+        PlaylistNameDialog(
+            title = stringResource(R.string.playlist_new),
+            initialName = "",
+            confirmLabel = stringResource(R.string.action_confirm),
+            onConfirm = { name ->
+                viewModel.createPlaylist(name, emptyList())
+                showCreatePlaylist = false
+            },
+            onDismiss = { showCreatePlaylist = false },
+        )
+    }
+
+    actionsTarget?.let { target ->
+        PlaylistActionsDialog(
+            playlistName = target.name,
+            onRename = {
+                renameTarget = target
+                actionsTarget = null
+            },
+            onDelete = {
+                viewModel.deletePlaylist(target.id)
+                actionsTarget = null
+            },
+            onDismiss = { actionsTarget = null },
+        )
+    }
+
+    renameTarget?.let { target ->
+        PlaylistNameDialog(
+            title = stringResource(R.string.playlist_rename),
+            initialName = target.name,
+            confirmLabel = stringResource(R.string.action_save),
+            onConfirm = { name ->
+                viewModel.renamePlaylist(target.id, name)
+                renameTarget = null
+            },
+            onDismiss = { renameTarget = null },
         )
     }
 

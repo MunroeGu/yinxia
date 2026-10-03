@@ -19,6 +19,8 @@
 | **排序方式** | 名称（A→Z / Z→A）、添加时间（新→旧 / 旧→新）、手动排序（长按拖动）；选择会被记住 |
 | **扫描范围** | 只扫描你勾选的文件夹（按文件夹粒度），同样会被记住 |
 | **删除歌曲** | 长按进入多选，可批量删除；Android 11+ 走系统确认框 |
+| **歌曲详细信息** | 顶栏信息图标切换：歌曲行是否显示第三行技术信息（格式 · 码率 · 采样率 · 文件大小）；默认关闭 |
+| **歌单** | 自建歌单：上方 chip 行筛选，长按歌曲多选后加入 / 移出；只存歌曲 id，存在本地 JSON 里，没有数据库 |
 | 迷你播放条 | 底部常驻，带进度条，点一下展开全屏播放页 |
 | 全屏播放页 | 大封面、可拖动进度条、上一首 / 播放暂停 / 下一首 / 随机 / 循环 |
 | 循环三态 | 关 → 列表循环 → 单曲循环 |
@@ -66,17 +68,54 @@
   另外，**跟随系统深色模式这件事完全没有变**：用哪种主题仍然由 `isSystemInDarkTheme()` 决定，
   变的只是强调色本身会按当前主题调整明暗。
 - **桌面插件**：`widget/PlayerWidgetProvider.kt`（接收器 + 按钮处理）和 `widget/PlayerWidget.kt`
-  （拼 `RemoteViews` 并推给桌面）。布局 `res/layout/widget_player.xml`，声明 `res/xml/player_widget_info.xml`。
+  （拼 `RemoteViews` 并推给桌面）。布局有**两套**：`res/layout/widget_player.xml`（横向，宽高比 ≥ 2 时用，也就是 3x1 / 4x1）
+  和 `res/layout/widget_player_square.xml`（纵向：封面、标题、歌手，然后一行均匀铺开的控制按钮，用于 2x2 这类接近方形的尺寸）。
+  声明 `res/xml/player_widget_info.xml`。
   显示封面 + 标题 + 歌手 + 上一首 / 播放暂停 / 下一首，点插件本体打开 App，
-  `resizeMode="horizontal|vertical"` 所以可以自由拉伸。有三个实现上的点值得记一下：
+  `resizeMode="horizontal|vertical"` 所以可以自由拉伸。下面的实现细节值得记一下：
   - **插件只能用 RemoteViews + XML 布局，不能用 Compose。** 插件的界面跑在桌面的进程里，
     App 做的只是"把一段构建好的 RemoteViews 推给系统"，Compose 的运行时根本不在那边。
-  - **更新由 App 主动推，并且按签名去重。** 签名是「歌曲 id | 标题 | 歌手 | 是否在播」，
+  - **两套布局在运行时选，用户拉伸时会重算。** `PlayerWidget.layoutFor(...)` 读
+    `AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH/MIN_HEIGHT` 的宽高比来决定用哪一套；
+    `PlayerWidgetProvider.onAppWidgetOptionsChanged` 在尺寸变化时重新渲染一次。
+    两套布局**故意共用同一批 view id**，所以推送代码不需要按布局分叉。
+  - **背景是半透明的，只留一圈发丝描边。** 由 `widget_background.xml` 配合
+    `widget_background` / `widget_outline` 两个颜色实现；这两个颜色都带 alpha，
+    并且 `values` 与 `values-night` 的取值不同。
+  - **更新由 App 主动推，并且按签名去重。** 签名是「歌曲 id | 标题 | 歌手 | 是否在播 | 封面位图是否真的拿到了」，
     和上次一样就直接返回，所以每秒两次的进度刷新不会反复刷插件。
+    > 这里修掉过一个真实的 bug：签名以前不含"封面是否可用"，换歌的瞬间封面还没解码完就先推了一次，
+    > 桌面收到的自然是占位图；而之后签名再也没变过，于是**永远不会有第二次推送**，
+    > 插件上的封面就一直是那张音符占位图。把封面可用性并进签名，封面解码完成后才会补上那一次推送。
   - **按钮点击**经由 `PlaybackConnection` 连到 `MediaSessionService` 真正控制播放；
     播放/暂停只改图标那一个控件（`partiallyUpdateAppWidget`），封面和文字不重画，所以插件不会闪。
+  - **"点插件打开 App" 的 `PendingIntent` 只挂在封面的 `ImageView` 上**，不再挂在根布局视图上。
+    > 这是针对"按钮点了没反应"的一个**推断性修复**（没有在 MIUI 上实测过）：挂在根布局时，
+    > MIUI 的桌面容易把根视图的点击当成整个插件的点击，顺手把子按钮的点击一起吃掉；
+    > 移到封面之后，上一首 / 播放暂停 / 下一首这三个按钮的点击才有机会正常送达。
 
-**目前没做**：播放列表/收藏、文件夹层级浏览（只有扫描范围，没有按文件夹分组的视图）、均衡器、歌词、按专辑/歌手分组、独立播放队列（队列就是当前显示的列表）。
+**歌曲详细信息与歌单：**
+
+- **歌曲详细信息开关**：顶栏多了一个信息图标（`ic_info`），点一下切换歌曲行是否显示第三行技术信息。
+  这一行由 `util/SongDetails.kt` 的 `songDetailText` 生成，内容依次是格式、码率、采样率、文件大小，
+  例如 `FLAC · 320 kbps · 44.1 kHz · 8.4 MB`；`songDetailText` 在什么都不知道时返回 null，那一行就不画。
+  开关存在 `LibraryPreferences.showSongDetails`（默认 false），一路暴露成
+  `LibraryUiState.showSongDetails` / `PlayerViewModel.setShowSongDetails`。
+  > 默认关掉，是因为用户明确说过喜欢现在这种干净的样子。
+  > 另外**不是所有版本都能拿到全部字段**：`MediaStore` 从 **Android 11（API 30）** 起才提供码率，
+  > 采样率更要 **Android 16（API 36）** 才有；老系统上查询直接不投影这两列，
+  > 那一行就只显示拿得到的部分。格式和文件大小则一直都有。
+- **歌单**：歌单由用户自己建，统一存在 `LibraryPreferences.playlists` 里，是一段 JSON（用 `org.json`，没有数据库）。
+  单个歌单是 `data/Playlist.kt` 的 data class，字段就三个：`id`、`name`、`songIds`。
+  界面上列表上方有一条 chip 行（`ui/PlaylistChips.kt`）：「全部」+ 每个歌单一个 chip + 一个「新建歌单」chip，
+  点 chip 就把音乐库过滤到那个歌单；**长按 chip** 会弹出重命名 / 删除（`ui/PlaylistSheets.kt`）。
+  建歌单的入口在音乐库里：长按歌曲进入多选，多选态的顶栏有一个「歌单」按钮，点开 `AddToPlaylistSheet` ——
+  输入新名字走「新建并加入」，或者直接挑一个已有歌单。当已经处在某个歌单的筛选状态时，同一个按钮变成「移出歌单」。
+  从设备上删歌时会同步执行 `dropMissingSongsFromPlaylists`，把它从所有歌单里去掉。
+  因为歌单**只存 id**，被删掉或者不在扫描范围内的歌会被直接忽略，不会留下坏条目。
+  > 一个歌单被清空后 chip 行**仍然显示**，所以永远能切回「全部」，不会卡在空歌单里出不来。
+
+**目前没做**：收藏、文件夹层级浏览（只有扫描范围，没有按文件夹分组的视图）、均衡器、歌词、按专辑/歌手分组、独立播放队列（队列就是当前显示的列表）。这里更正一处：**播放列表已经做了**（用户自建歌单，见上文），没做的只剩**收藏和队列管理**。
 
 ---
 
@@ -140,9 +179,10 @@ Yinxia/
       │  │                                 靠 onResume 处理"去设置里开权限再回来"；
       │  │                                 删除也要在这里发起（系统确认框只能用 IntentSender）
       │  ├─ data/
-      │  │  ├─ Song.kt                     一首歌的数据（含文件夹和添加时间）
+      │  │  ├─ Song.kt                     一首歌的数据（含文件夹、添加时间，以及码率/采样率/大小/MIME 等技术字段）
       │  │  ├─ SortMode.kt                 排序方式枚举
       │  │  ├─ FolderEntry.kt              一个含音频的文件夹
+      │  │  ├─ Playlist.kt                 自建歌单（只存歌曲 id）
       │  │  ├─ LibraryPreferences.kt       排序/扫描范围/手动顺序的持久化
       │  │  ├─ MusicRepository.kt          用 MediaStore 扫描本地音频 + 汇总文件夹
       │  │  └─ ArtworkLoader.kt            封面解码 + 内存 LRU 缓存 + 提主题种子色（自己写的直方图取色，没引 Palette）
@@ -154,9 +194,11 @@ Yinxia/
       │  │  │                              排序/范围过滤/多选/删除请求都在这里
       │  │  ├─ App.kt                      权限门 / 列表 / 迷你条 / 各种面板 的组装
       │  │  ├─ LibraryScreen.kt            歌曲列表（普通 / 多选 / 手动排序三种形态）
+      │  │  ├─ PlaylistChips.kt            列表上方的歌单筛选条
       │  │  ├─ SortSheet.kt                排序方式面板
       │  │  ├─ FolderSheet.kt              扫描范围面板
       │  │  ├─ ThemeSheet.kt               默认主题色面板（10 色预设）
+      │  │  ├─ PlaylistSheets.kt           加入歌单面板 / 命名与重命名对话框 / 歌单操作菜单
       │  │  ├─ MiniPlayer.kt               底部迷你播放条
       │  │  ├─ NowPlaying.kt               全屏播放页
       │  │  ├─ Artwork.kt                  封面组件（取不到封面就按歌曲 id 用渐变兜底）
@@ -164,12 +206,14 @@ Yinxia/
       │  │     ├─ AccentTheme.kt           按主题调整强调色；只覆盖 4 个色位
       │  │     └─ AccentPalette.kt         默认主题色的 10 个固定预设
       │  ├─ util/Format.kt                 毫秒 → 3:07 / 1:02:45
+      │  ├─ util/SongDetails.kt            把码率/采样率/大小拼成一行文字
       │  └─ widget/
       │     ├─ PlayerWidget.kt            拼 RemoteViews 并推给桌面（按签名去重）
       │     └─ PlayerWidgetProvider.kt    AppWidgetProvider：接收器 + 按钮点击
       └─ res/
          ├─ drawable/ic_*.xml              自绘矢量图标（播放、暂停、排序、文件夹、删除…；填充图形也带同色圆角描边）
          ├─ layout/widget_player.xml       桌面插件布局（RemoteViews 只能用传统 View，不能用 Compose）
+         ├─ layout/widget_player_square.xml 竖排插件布局（2×2 这类接近方形的尺寸用；布局按宽高比在运行时选）
          ├─ mipmap-anydpi-v26/             自适应启动图标
          ├─ values/                        文案、颜色、主题
          └─ xml/player_widget_info.xml     桌面插件声明（resizeMode 可自由拉伸）
@@ -195,6 +239,7 @@ Yinxia/
 | 过滤掉更短的音频（默认 15 秒） | `MusicRepository.MIN_DURATION_MS` |
 | 进度刷新频率（默认 500ms） | `PlayerViewModel.PROGRESS_INTERVAL_MS` |
 | 封面缓存数量（默认 80 张） | `ArtworkLoader.CACHE_SIZE` |
+| 歌曲信息显示哪些字段 | `util/SongDetails.kt` 的 `songDetailText`（拼接顺序与单位都在这里） |
 | 应用名 / 包名 | `res/values/strings.xml` 的 `app_name`；包名要同步改 `build.gradle.kts` 的 `namespace`、`applicationId` 和 Kotlin 的 package |
 | 支持更老的手机 | 改 `minSdk`。但要注意启动图标只做了 API 26+ 的自适应图标（纯矢量），降到 26 以下得补位图图标 |
 

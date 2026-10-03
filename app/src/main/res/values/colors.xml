@@ -6,9 +6,10 @@
     <color name="splash_background">#FFFBFE</color>
 
     <!-- 桌面插件（浅色） -->
-    <color name="widget_background">#F4F0FA</color>
+    <color name="widget_background">#D9F4F0FA</color>
     <color name="widget_text_primary">#1C1B1F</color>
     <color name="widget_text_secondary">#5A5566</color>
     <color name="widget_icon">#4A4458</color>
-    <color name="widget_placeholder">#E7E0EC</color>
+    <color name="widget_placeholder">#B3E7E0EC</color>
+    <color name="widget_outline">#1F000000</color>
 </resources>

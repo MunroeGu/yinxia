@@ -23,7 +23,7 @@ class MusicRepository(private val context: Context) {
         val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
         val folderColumnName = resolveFolderColumnName(useRelativePath)
 
-        val projection = arrayOf(
+        val projection = mutableListOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
@@ -31,8 +31,27 @@ class MusicRepository(private val context: Context) {
             MediaStore.Audio.Media.ALBUM_ID,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DATE_ADDED,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.MIME_TYPE,
             folderColumnName,
         )
+        // BITRATE 是 Android 11（API 30）才有的列，SAMPLERATE 是 Android 16（API 36）才有的；
+        // 低版本上查询这些列会直接抛异常，所以按版本加进去
+        val bitrateColumnName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            MediaStore.Audio.Media.BITRATE
+        } else {
+            null
+        }
+        // 注意：SAMPLERATE 是 API 36（Android 16）才加进 MediaStore 的，不是 API 31。
+        // 版本写错会让 Android 12~15 的投影带上一个不存在的列，query 直接抛异常，
+        // 而异常在下面被吞成"空列表"，表现出来就是"歌曲全不见了"。
+        val sampleRateColumnName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            MediaStore.Audio.Media.SAMPLERATE
+        } else {
+            null
+        }
+        bitrateColumnName?.let { projection += it }
+        sampleRateColumnName?.let { projection += it }
 
         // IS_MUSIC 能滤掉铃声、通知音、录音；时长下限再滤掉系统音效
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0" +
@@ -43,7 +62,7 @@ class MusicRepository(private val context: Context) {
         try {
             context.contentResolver.query(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection,
+                projection.toTypedArray(),
                 selection,
                 selectionArgs,
                 sortOrder,
@@ -56,6 +75,10 @@ class MusicRepository(private val context: Context) {
                 val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                 val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
                 val folderColumn = cursor.getColumnIndexOrThrow(folderColumnName)
+                val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                val bitrateColumn = bitrateColumnName?.let { cursor.getColumnIndex(it) } ?: -1
+                val sampleRateColumn = sampleRateColumnName?.let { cursor.getColumnIndex(it) } ?: -1
 
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idColumn)
@@ -80,6 +103,10 @@ class MusicRepository(private val context: Context) {
                         folderName = folderNameOf(folderKey),
                         // DATE_ADDED 是秒，统一成毫秒
                         dateAddedMs = cursor.getLong(dateAddedColumn) * 1000L,
+                        bitrate = if (bitrateColumn >= 0) cursor.getInt(bitrateColumn) else null,
+                        sampleRate = if (sampleRateColumn >= 0) cursor.getInt(sampleRateColumn) else null,
+                        sizeBytes = cursor.getLong(sizeColumn),
+                        mimeType = cursor.getString(mimeColumn),
                     )
                 }
             }
