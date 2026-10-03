@@ -107,6 +107,23 @@ class LibraryPreferences(context: Context) {
             prefs.edit().putString(KEY_PLAYLISTS, array.toString()).apply()
         }
 
+    /** 上次播放的队列（歌曲 id 顺序）。进程被杀后靠它把队列恢复回来 */
+    var queueSongIds: List<Long>
+        get() = prefs.getString(KEY_QUEUE, null)
+            ?.split(',')
+            ?.mapNotNull { it.toLongOrNull() }
+            .orEmpty()
+        set(value) {
+            prefs.edit().putString(KEY_QUEUE, value.joinToString(",")).apply()
+        }
+
+    /** 队列里正在播第几首 */
+    var queueIndex: Int
+        get() = prefs.getInt(KEY_QUEUE_INDEX, 0)
+        set(value) {
+            prefs.edit().putInt(KEY_QUEUE_INDEX, value).apply()
+        }
+
     private companion object {
         const val PREFS_NAME = "yinxia_library"
         const val KEY_SORT_MODE = "sort_mode"
@@ -117,5 +134,7 @@ class LibraryPreferences(context: Context) {
         const val KEY_DEFAULT_ACCENT = "default_accent_argb"
         const val KEY_SHOW_DETAILS = "show_song_details"
         const val KEY_PLAYLISTS = "playlists"
+        const val KEY_QUEUE = "queue_song_ids"
+        const val KEY_QUEUE_INDEX = "queue_index"
     }
 }

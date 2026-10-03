@@ -395,7 +395,7 @@ private fun YinxiaAppContent(
                         selectedIds = library.selectedSongIds,
                         sorting = manualSorting,
                         showDetails = library.showSongDetails,
-                        onSongClick = viewModel::playSong,
+                        onSongClick = viewModel::onSongSelected,
                         onSongLongClick = { song ->
                             if (library.selectionMode) {
                                 viewModel.toggleSelection(song.id)

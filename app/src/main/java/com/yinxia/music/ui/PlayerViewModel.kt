@@ -5,7 +5,6 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import com.yinxia.music.R
 import com.yinxia.music.data.FolderEntry
@@ -15,6 +14,7 @@ import com.yinxia.music.data.Playlist
 import com.yinxia.music.data.Song
 import com.yinxia.music.data.SortMode
 import com.yinxia.music.player.PlaybackConnection
+import com.yinxia.music.player.toMediaItem
 import com.yinxia.music.widget.PlayerWidget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -128,7 +128,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             if (isPlaying) startProgressUpdates() else stopProgressUpdates()
         }
 
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = syncPlayback()
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            syncPlayback()
+            persistQueueIndex()
+        }
 
         override fun onPlaybackStateChanged(playbackState: Int) = syncPlayback()
 
@@ -155,8 +158,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (startIndex < 0) return
 
         controller.setMediaItems(queue.map { it.toMediaItem() }, startIndex, 0L)
+        // 把队列存下来：系统杀掉进程后，桌面插件要靠它把队列恢复回来
+        preferences.queueSongIds = queue.map { it.id }
+        preferences.queueIndex = startIndex
         controller.prepare()
         controller.play()
+    }
+
+    /**
+     * 列表里点一首歌：
+     *  - 点的就是当前这首 → 暂停 / 继续（不会从头开始，位置保留）
+     *  - 点的是别的歌 → 从这首重新开始播
+     */
+    fun onSongSelected(song: Song) {
+        if (song.id == _playback.value.currentSongId) {
+            togglePlayPause()
+        } else {
+            playSong(song)
+        }
     }
 
     fun togglePlayPause() {
@@ -242,20 +261,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         PlayerWidget.push(getApplication(), song, controller.isPlaying)
     }
 
-    private fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
-        .setMediaId(id.toString())
-        .setUri(uri)
-        .setMediaMetadata(
-            MediaMetadata.Builder()
-                .setTitle(title)
-                .setArtist(artist)
-                .setAlbumTitle(album)
-                .setIsBrowsable(false)
-                .setIsPlayable(true)
-                .build(),
-        )
-        .build()
-
     // ------------------------------------------------------------ 音乐库
 
     fun loadLibrary() {
@@ -292,6 +297,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (added.isNotEmpty()) manualOrder.addAll(added)
 
         if (removed || added.isNotEmpty()) preferences.manualOrder = manualOrder
+    }
+
+    /**
+     * 把"当前队列 + 播到第几首"写进偏好设置。
+     *
+     * 每次切歌写一次，代价是可以接受的（一首歌才一次），换来的好处是
+     * 进程被系统杀掉之后还能把队列恢复出来 —— 否则桌面插件的按钮会对一个空队列下命令。
+     */
+    private fun persistQueueIndex() {
+        val controller = connection.controller ?: return
+        if (controller.mediaItemCount == 0) return
+
+        val ids = (0 until controller.mediaItemCount).mapNotNull { index ->
+            controller.getMediaItemAt(index).mediaId.toLongOrNull()
+        }
+        if (ids.isEmpty()) return
+
+        preferences.queueSongIds = ids
+        preferences.queueIndex = controller.currentMediaItemIndex.coerceAtLeast(0)
     }
 
     /**

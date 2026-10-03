@@ -48,7 +48,7 @@ import androidx.compose.ui.zIndex
 import com.yinxia.music.R
 import com.yinxia.music.data.Song
 import com.yinxia.music.util.formatDuration
-import com.yinxia.music.util.songDetailText
+import com.yinxia.music.util.songDetailLines
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -302,16 +302,17 @@ private fun SongRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            val details = if (showDetails) songDetailText(song) else null
-            if (details != null) {
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = details,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            if (showDetails) {
+                songDetailLines(song).forEach { line ->
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = line,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
 
