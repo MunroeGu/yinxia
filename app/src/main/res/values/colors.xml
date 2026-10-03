@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 自适应图标背景色（深紫），保持与 App 主色一致 -->
-    <color name="ic_launcher_background">#1B1430</color>
+    <!-- 自适应图标背景色（深蓝），取自 App 图标插画的背景主色调 -->
+    <color name="ic_launcher_background">#1B4A8F</color>
     <!-- 启动瞬间的窗口底色，避免白屏闪一下 -->
     <color name="splash_background">#FFFBFE</color>
 

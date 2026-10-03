@@ -32,8 +32,8 @@ class PlayerWidgetProvider : AppWidgetProvider() {
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray,
     ) {
-        // 先画一个静态样子，避免插件刚加上去是一片空白
-        PlayerWidget.updateAll(context, null, null, false, null)
+        // 先用存下来的状态画出来：不依赖播放服务，所以拉尺寸、重建插件时一定会有反应
+        PlayerWidget.renderFromStoredState(context)
         refreshFromService(context)
     }
 
@@ -43,8 +43,9 @@ class PlayerWidgetProvider : AppWidgetProvider() {
         appWidgetId: Int,
         newOptions: android.os.Bundle,
     ) {
-        // 用户拉伸了插件：立刻按新尺寸重画一次，并顺手从播放服务取一次真实状态
         super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
+        // 尺寸变了要立刻按新尺寸重画；同样先走"不连服务"的那条路
+        PlayerWidget.renderFromStoredState(context)
         refreshFromService(context)
     }
 
@@ -68,6 +69,11 @@ class PlayerWidgetProvider : AppWidgetProvider() {
     }
 
     private fun handleCommand(context: Context, action: String) {
+        // 先给一个立刻的视觉反馈，这一步完全不连服务：
+        // 图标翻了说明广播送到了我们进程（问题在命令那一段）；
+        // 图标纹丝不动说明点击根本没送到这个 receiver。
+        if (action == ACTION_TOGGLE) PlayerWidget.toggleIconOptimistically(context)
+
         withConnection(context) { controller ->
             // 队列空了（进程刚被杀过）就先按上次的顺序重建，再执行命令
             QueueRestore.restoreIfEmpty(context, controller)

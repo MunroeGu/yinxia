@@ -52,11 +52,60 @@ object PlayerWidget {
         // 否则切歌那一瞬间的推送会把占位图发到桌面，而且之后再也不会重推真封面。
         // coverFor 在拿不到封面时不写缓存，所以后面再调用一次就能取到。
         val cover = coverFor(song?.id)
+
+        // 先把状态存下来。必须放在签名去重之前：即使这一次因为"没实质变化"不重推界面，
+        // 插件下次重画（onUpdate / 拉伸尺寸）也要能拿到最新的歌名和播放状态。
+        val preferences = com.yinxia.music.data.LibraryPreferences(context)
+        preferences.widgetTitle = song?.title
+        preferences.widgetArtist = song?.artist
+        preferences.widgetIsPlaying = isPlaying
+        preferences.widgetSongId = song?.id ?: -1L
+
         val signature = "${song?.id}|${song?.title}|${song?.artist}|$isPlaying|${cover != null}"
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getString(KEY_LAST_STATE, null) == signature) return
         prefs.edit().putString(KEY_LAST_STATE, signature).apply()
         updateAll(context, song?.title, song?.artist, isPlaying, cover)
+    }
+
+    /**
+     * 仅用上次存下来的状态重画一次，**完全不连播放服务**。
+     *
+     * 插件尺寸变化时走这条路：只要连接服务失败，原来那条路径就什么都不会重画，
+     * 表现就是"拉成 2x2 布局也不变"。
+     */
+    fun renderFromStoredState(context: Context) {
+        val preferences = com.yinxia.music.data.LibraryPreferences(context)
+        val songId = preferences.widgetSongId.takeIf { it > 0 }
+        updateAll(
+            context = context,
+            title = preferences.widgetTitle,
+            artist = preferences.widgetArtist,
+            isPlaying = preferences.widgetIsPlaying,
+            cover = coverFor(songId),
+        )
+    }
+
+    /**
+     * 点一下播放/暂停时**立刻**把图标翻过来（不连服务、不等回调）。
+     *
+     * 两个作用：
+     *  1. 用户马上看到反馈，而不是"按了没反应"；
+     *  2. 这是唯一能远程判断"点击到底有没有送到我们进程"的方法 ——
+     *     如果图标翻了，说明广播到了，问题在命令那一段；如果图标纹丝不动，说明点击根本没送到。
+     * 真正状态稍后由服务回调（或 App 下一次推送）纠正。
+     */
+    fun toggleIconOptimistically(context: Context) {
+        val preferences = com.yinxia.music.data.LibraryPreferences(context)
+        val nowPlaying = !preferences.widgetIsPlaying
+        preferences.widgetIsPlaying = nowPlaying
+        updateAll(
+            context = context,
+            title = preferences.widgetTitle,
+            artist = preferences.widgetArtist,
+            isPlaying = nowPlaying,
+            cover = coverFor(preferences.widgetSongId.takeIf { it > 0 }),
+        )
     }
 
     fun updateAll(
@@ -101,22 +150,40 @@ object PlayerWidget {
             context.getString(if (isPlaying) R.string.action_pause else R.string.action_play),
         )
 
-        setOnClickPendingIntent(
+        bindClick(
             R.id.widget_toggle,
             commandIntent(context, PlayerWidgetProvider.ACTION_TOGGLE, REQUEST_TOGGLE),
         )
-        setOnClickPendingIntent(
+        bindClick(
             R.id.widget_prev,
             commandIntent(context, PlayerWidgetProvider.ACTION_PREV, REQUEST_PREV),
         )
-        setOnClickPendingIntent(
+        bindClick(
             R.id.widget_next,
             commandIntent(context, PlayerWidgetProvider.ACTION_NEXT, REQUEST_NEXT),
         )
         // 注意：不要把"打开 App"挂在根布局上 —— 小米启动器会把它当成整块插件的点击，
         // 子按钮的点击就收不到了（用户反馈的"按钮无响应"很可能就是这个）。
         // 改成只有封面能点开 App。
-        setOnClickPendingIntent(R.id.widget_cover, openAppIntent(context))
+        bindClick(R.id.widget_cover, openAppIntent(context))
+    }
+
+    /**
+     * 绑定点击。Android 12+ 用新的 setOnClickResponse（框架现在推荐的方式，
+     * 重建视图后更不容易丢），低版本退回 setOnClickPendingIntent。
+     *
+     * 注意 RemoteResponse 是 RemoteViews 的**嵌套类**（android/widget/RemoteViews$RemoteResponse），
+     * 没有 android.widget.RemoteResponse 这个顶层类，写错了会直接编译不过。
+     */
+    private fun RemoteViews.bindClick(viewId: Int, pendingIntent: PendingIntent) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            setOnClickResponse(
+                viewId,
+                android.widget.RemoteViews.RemoteResponse.fromPendingIntent(pendingIntent),
+            )
+        } else {
+            setOnClickPendingIntent(viewId, pendingIntent)
+        }
     }
 
     /**

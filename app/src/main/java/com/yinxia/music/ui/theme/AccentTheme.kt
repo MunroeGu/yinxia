@@ -47,21 +47,28 @@ fun AccentTheme(
     accent: Color?,
     content: @Composable () -> Unit,
 ) {
-    if (accent == null) {
-        content()
-        return
-    }
-
     val base = MaterialTheme.colorScheme
-    val container = lerp(base.surface, accent, 0.28f)
 
-    MaterialTheme(
-        colorScheme = base.copy(
+    // ⚠️ 这里**必须只有一条调用结构**，不能写成"accent == null 就直接 content() 返回"。
+    //
+    // 之前就是那么写的：两条分支里 content() 的调用点不同，于是当强调色在"有 / 无"之间切换时，
+    // Compose 会认为那是一棵全新的树，把整个子树重建一遍 ——
+    // LazyColumn 的滚动状态随之丢失，表现为"换歌时闪一下并跳回列表顶部"。
+    // 触发条件很具体：切到一首没有封面的歌（取色返回 null，又没设过默认色），强调色变 null。
+    val container = if (accent == null) base.primaryContainer else lerp(base.surface, accent, 0.28f)
+    val scheme = if (accent == null) {
+        base
+    } else {
+        base.copy(
             primary = accent,
             onPrimary = onAccentColor(accent),
             primaryContainer = container,
             onPrimaryContainer = onAccentColor(container),
-        ),
+        )
+    }
+
+    MaterialTheme(
+        colorScheme = scheme,
         typography = MaterialTheme.typography,
         shapes = MaterialTheme.shapes,
         content = content,

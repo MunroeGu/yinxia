@@ -124,6 +124,31 @@ class LibraryPreferences(context: Context) {
             prefs.edit().putInt(KEY_QUEUE_INDEX, value).apply()
         }
 
+    /** 桌面插件上次渲染用的状态。插件渲染不再依赖播放服务，靠这几个值就能画出上次的样子 */
+    var widgetTitle: String?
+        get() = prefs.getString(KEY_WIDGET_TITLE, null)
+        set(value) {
+            prefs.edit().putString(KEY_WIDGET_TITLE, value).apply()
+        }
+
+    var widgetArtist: String?
+        get() = prefs.getString(KEY_WIDGET_ARTIST, null)
+        set(value) {
+            prefs.edit().putString(KEY_WIDGET_ARTIST, value).apply()
+        }
+
+    var widgetIsPlaying: Boolean
+        get() = prefs.getBoolean(KEY_WIDGET_PLAYING, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_WIDGET_PLAYING, value).apply()
+        }
+
+    var widgetSongId: Long
+        get() = prefs.getLong(KEY_WIDGET_SONG_ID, -1L)
+        set(value) {
+            prefs.edit().putLong(KEY_WIDGET_SONG_ID, value).apply()
+        }
+
     private companion object {
         const val PREFS_NAME = "yinxia_library"
         const val KEY_SORT_MODE = "sort_mode"
@@ -136,5 +161,9 @@ class LibraryPreferences(context: Context) {
         const val KEY_PLAYLISTS = "playlists"
         const val KEY_QUEUE = "queue_song_ids"
         const val KEY_QUEUE_INDEX = "queue_index"
+        const val KEY_WIDGET_TITLE = "widget_title"
+        const val KEY_WIDGET_ARTIST = "widget_artist"
+        const val KEY_WIDGET_PLAYING = "widget_is_playing"
+        const val KEY_WIDGET_SONG_ID = "widget_song_id"
     }
 }

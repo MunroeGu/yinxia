@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">音匣</string>
+    <string name="app_name">肥鱼之声</string>
 
     <string name="library_title">音乐库</string>
     <string name="search_hint">搜索歌曲、歌手或专辑</string>
