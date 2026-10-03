@@ -98,12 +98,14 @@ fun MiniPlayer(
                         contentDescription = stringResource(
                             if (isPlaying) R.string.action_pause else R.string.action_play,
                         ),
+                        tint = MaterialTheme.colorScheme.primary,
                     )
                 }
                 IconButton(onClick = onNext) {
                     Icon(
                         painter = painterResource(R.drawable.ic_skip_next),
                         contentDescription = stringResource(R.string.action_next),
+                        tint = MaterialTheme.colorScheme.primary,
                     )
                 }
             }

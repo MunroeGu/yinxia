@@ -2,6 +2,9 @@ package com.yinxia.music.ui
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,21 +39,66 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.yinxia.music.R
+import com.yinxia.music.data.ArtworkLoader
 import com.yinxia.music.data.SortMode
+import com.yinxia.music.ui.theme.AccentTheme
+import com.yinxia.music.ui.theme.accentForTheme
 import kotlinx.coroutines.launch
 
 /**
  * 应用主界面：权限门 -> 音乐库 -> 迷你播放条 -> 全屏播放页，
  * 外加排序面板、扫描范围面板、多选删除。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun YinxiaApp(
+    viewModel: PlayerViewModel,
+    permissionGranted: Boolean,
+    onRequestPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit,
+    onDeleteRequest: (List<Uri>) -> Unit,
+) {
+    val library by viewModel.library.collectAsState()
+    val playback by viewModel.playback.collectAsState()
+    val context = LocalContext.current
+    val darkTheme = isSystemInDarkTheme()
+    val playingSong = library.allSongs.firstOrNull { it.id == playback.currentSongId }
+
+    // 主题色优先跟随当前播放歌曲的封面；没有封面就退回用户自选的默认色
+    var coverSeed by remember { mutableStateOf<Color?>(null) }
+    LaunchedEffect(playingSong?.id) {
+        coverSeed = playingSong?.let { ArtworkLoader.coverColor(context, it) }
+    }
+    val seed = coverSeed ?: library.defaultAccentArgb?.let { Color(it) }
+    val accent = seed?.let { accentForTheme(it, darkTheme) }
+
+    // 换歌时颜色渐变过去，避免硬切
+    val animatedAccent by animateColorAsState(
+        targetValue = accent ?: MaterialTheme.colorScheme.primary,
+        animationSpec = tween(durationMillis = 600),
+        label = "accent",
+    )
+
+    AccentTheme(accent = accent?.let { animatedAccent }) {
+        YinxiaAppContent(
+            viewModel = viewModel,
+            permissionGranted = permissionGranted,
+            onRequestPermission = onRequestPermission,
+            onOpenAppSettings = onOpenAppSettings,
+            onDeleteRequest = onDeleteRequest,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun YinxiaAppContent(
     viewModel: PlayerViewModel,
     permissionGranted: Boolean,
     onRequestPermission: () -> Unit,
@@ -66,6 +114,7 @@ fun YinxiaApp(
     var showSortSheet by remember { mutableStateOf(false) }
     var showFolderSheet by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showThemeSheet by remember { mutableStateOf(false) }
 
     // 多选/拖动是"模式"，按返回键应该先退出模式而不是退出 App
     BackHandler(enabled = library.selectionMode || library.manualEditing) {
@@ -123,6 +172,7 @@ fun YinxiaApp(
                                 Icon(
                                     painter = painterResource(R.drawable.ic_delete),
                                     contentDescription = stringResource(R.string.action_delete),
+                                    tint = MaterialTheme.colorScheme.error,
                                 )
                             }
                         },
@@ -163,12 +213,21 @@ fun YinxiaApp(
                                     Icon(
                                         painter = painterResource(R.drawable.ic_sort),
                                         contentDescription = stringResource(R.string.action_sort),
+                                        tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
                                 IconButton(onClick = { showFolderSheet = true }) {
                                     Icon(
                                         painter = painterResource(R.drawable.ic_folder),
                                         contentDescription = stringResource(R.string.action_scan_range),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                                IconButton(onClick = { showThemeSheet = true }) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_palette),
+                                        contentDescription = stringResource(R.string.action_theme),
+                                        tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
                                 IconButton(
@@ -182,6 +241,7 @@ fun YinxiaApp(
                                             if (searchVisible) R.drawable.ic_close else R.drawable.ic_search,
                                         ),
                                         contentDescription = stringResource(R.string.search_hint),
+                                        tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
                             }
@@ -302,6 +362,18 @@ fun YinxiaApp(
             onToggle = viewModel::setFolderSelected,
             onScanAll = viewModel::scanAllFolders,
             onDismiss = { showFolderSheet = false },
+        )
+    }
+
+    if (showThemeSheet) {
+        ThemeSheet(
+            selectedArgb = library.defaultAccentArgb,
+            darkTheme = isSystemInDarkTheme(),
+            onSelect = { argb ->
+                viewModel.setDefaultAccent(argb)
+                showThemeSheet = false
+            },
+            onDismiss = { showThemeSheet = false },
         )
     }
 

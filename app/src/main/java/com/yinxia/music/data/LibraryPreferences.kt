@@ -53,6 +53,18 @@ class LibraryPreferences(context: Context) {
             prefs.edit().putString(KEY_MANUAL_ORDER, value.joinToString(",")).apply()
         }
 
+    /**
+     * 用户自定义的默认主题色（ARGB）。null 表示"没指定"，界面用主题自带的紫罗兰。
+     * 用 contains 判断有没有设过：没设过和设成 0 是两件事。
+     */
+    var defaultAccentArgb: Int?
+        get() = if (prefs.contains(KEY_DEFAULT_ACCENT)) prefs.getInt(KEY_DEFAULT_ACCENT, 0) else null
+        set(value) {
+            prefs.edit().apply {
+                if (value == null) remove(KEY_DEFAULT_ACCENT) else putInt(KEY_DEFAULT_ACCENT, value)
+            }.apply()
+        }
+
     private companion object {
         const val PREFS_NAME = "yinxia_library"
         const val KEY_SORT_MODE = "sort_mode"
@@ -60,5 +72,6 @@ class LibraryPreferences(context: Context) {
         const val KEY_FOLDER_FILTER = "folder_filter_enabled"
         const val KEY_FOLDERS = "selected_folders"
         const val KEY_MANUAL_ORDER = "manual_order"
+        const val KEY_DEFAULT_ACCENT = "default_accent_argb"
     }
 }

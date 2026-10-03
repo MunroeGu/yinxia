@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面插件布局。
+  注意：插件只能用 RemoteViews 支持的传统 View（没有 Compose），
+  所以这里是一份普通的 XML 布局，样式尽量靠 drawable 和颜色资源控制。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="10dp">
+
+    <ImageView
+        android:id="@+id/widget_cover"
+        android:layout_width="54dp"
+        android:layout_height="54dp"
+        android:scaleType="centerCrop"
+        android:src="@drawable/widget_cover_placeholder" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_marginEnd="4dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/app_name"
+            android:textColor="@color/widget_text_primary"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_artist"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/widget_idle"
+            android:textColor="@color/widget_text_secondary"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/widget_prev"
+        android:layout_width="38dp"
+        android:layout_height="38dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/action_previous"
+        android:padding="7dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_skip_previous"
+        android:tint="@color/widget_icon" />
+
+    <ImageButton
+        android:id="@+id/widget_toggle"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/action_play"
+        android:padding="6dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_play"
+        android:tint="@color/widget_icon" />
+
+    <ImageButton
+        android:id="@+id/widget_next"
+        android:layout_width="38dp"
+        android:layout_height="38dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/action_next"
+        android:padding="7dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_skip_next"
+        android:tint="@color/widget_icon" />
+</LinearLayout>

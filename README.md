@@ -26,7 +26,10 @@
 | 蓝牙 / 耳机按键 | 上一首下一首、播放暂停由系统接管 |
 | 拔耳机自动暂停 | 不会突然外放 |
 | 后台播放 | 前台服务 + `mediaPlayback` 类型，划掉最近任务也不会断 |
-| 深色 / 浅色模式 | 跟随系统；主色是自定的紫罗兰，也可一键改成壁纸取色 |
+| 深色 / 浅色模式 | 跟随系统；强调色跟随当前歌曲封面，没有封面时用自选的默认色，也可一键改成壁纸取色 |
+| **主题色跟随封面** | 从当前歌曲封面里提主色，播放按钮 / 进度条 / 正在播的那一行 / 顶栏与迷你条图标跟着变；换歌 600ms 渐变 |
+| **默认主题色可自定义** | 10 色预设面板（顶栏调色板图标打开）；只在歌曲没有封面时生效，存的是"种子色"，浅色/深色各自调整明暗 |
+| **桌面插件（可调大小）** | 封面 + 标题 + 歌手 + 上一首 / 播放暂停 / 下一首，点一下打开 App；可横向 / 纵向自由拉伸 |
 | 零外部 UI 依赖 | 图标全是自己画的矢量图，没有引 `material-icons-extended`、没有引图片加载库 |
 
 **三个新功能的具体行为：**
@@ -42,7 +45,38 @@
   Android 11+ 系统还会再弹一次确认框（`MediaStore.createDeleteRequest`），**这是系统强制的，App 自己删不掉**。
   删除时会同步把这首歌从播放队列里移除。
 
-**目前没做**：播放列表/收藏、文件夹层级浏览（只有扫描范围，没有按文件夹分组的视图）、均衡器、歌词、桌面小部件、按专辑/歌手分组、独立播放队列（队列就是当前显示的列表）。
+**主题色与桌面插件：**
+
+- **主题色跟随封面**：正在播放的歌曲有封面时，App 从封面里挑一个颜色当强调色
+  （`data/ArtworkLoader.kt` 里自己写的直方图取色：缩到 24×24 统计、量化成 4 位/通道的桶、
+  按「像素数 × (0.25 + 平均饱和度)」打分，并且丢掉接近黑/白/灰的像素）。
+  **没有引 Palette，也没有为它加任何依赖。** 覆盖的只有 `primary` / `onPrimary` /
+  `primaryContainer` / `onPrimaryContainer` 四个色位（`ui/theme/AccentTheme.kt`），
+  所以播放按钮、进度条、正在播的那一行、顶栏和迷你条的图标跟着封面走，
+  而背景和正文仍是原来那套配色。换歌时颜色用 600ms 交叉淡入淡出，不会硬切。
+  > 为什么只改四个色位：Material 的色位有几十个，全按封面重算，界面会变成一锅花里胡哨的颜色，
+  > 正文和背景的对比度也没法保证。只动"强调"相关的四个，效果明显又不会失控。
+- **默认主题色可自定义**：歌曲没有封面（或者根本没在播放）时，退回用户选的默认色。
+  顶栏的调色板图标打开底部面板（`ui/ThemeSheet.kt`），里面是 10 个固定预设（`ui/theme/AccentPalette.kt`）。
+  面板里存的其实是**种子色**，真正用的时候才由 `accentForTheme()` 按当前明暗主题调整：
+  饱和度抬到至少 0.45，亮度在深色主题夹进 0.72–0.92、浅色主题夹进 0.40–0.55 ——
+  所以同一个种子色在深浅两种主题下都好看，不用存两份。
+  > 为什么是固定预设而不是取色轮：预设能保证每个颜色在两种主题下都好看；
+  > 随便取色很容易取到发灰、在深色下看不见的颜色。
+  另外，**跟随系统深色模式这件事完全没有变**：用哪种主题仍然由 `isSystemInDarkTheme()` 决定，
+  变的只是强调色本身会按当前主题调整明暗。
+- **桌面插件**：`widget/PlayerWidgetProvider.kt`（接收器 + 按钮处理）和 `widget/PlayerWidget.kt`
+  （拼 `RemoteViews` 并推给桌面）。布局 `res/layout/widget_player.xml`，声明 `res/xml/player_widget_info.xml`。
+  显示封面 + 标题 + 歌手 + 上一首 / 播放暂停 / 下一首，点插件本体打开 App，
+  `resizeMode="horizontal|vertical"` 所以可以自由拉伸。有三个实现上的点值得记一下：
+  - **插件只能用 RemoteViews + XML 布局，不能用 Compose。** 插件的界面跑在桌面的进程里，
+    App 做的只是"把一段构建好的 RemoteViews 推给系统"，Compose 的运行时根本不在那边。
+  - **更新由 App 主动推，并且按签名去重。** 签名是「歌曲 id | 标题 | 歌手 | 是否在播」，
+    和上次一样就直接返回，所以每秒两次的进度刷新不会反复刷插件。
+  - **按钮点击**经由 `PlaybackConnection` 连到 `MediaSessionService` 真正控制播放；
+    播放/暂停只改图标那一个控件（`partiallyUpdateAppWidget`），封面和文字不重画，所以插件不会闪。
+
+**目前没做**：播放列表/收藏、文件夹层级浏览（只有扫描范围，没有按文件夹分组的视图）、均衡器、歌词、按专辑/歌手分组、独立播放队列（队列就是当前显示的列表）。
 
 ---
 
@@ -111,7 +145,7 @@ Yinxia/
       │  │  ├─ FolderEntry.kt              一个含音频的文件夹
       │  │  ├─ LibraryPreferences.kt       排序/扫描范围/手动顺序的持久化
       │  │  ├─ MusicRepository.kt          用 MediaStore 扫描本地音频 + 汇总文件夹
-      │  │  └─ ArtworkLoader.kt            封面解码 + 内存 LRU 缓存
+      │  │  └─ ArtworkLoader.kt            封面解码 + 内存 LRU 缓存 + 提主题种子色（自己写的直方图取色，没引 Palette）
       │  ├─ player/
       │  │  ├─ PlaybackService.kt          MediaSessionService：后台播放 + 系统媒体控制
       │  │  └─ PlaybackConnection.kt       界面进程 ↔ 播放服务的桥梁
@@ -122,15 +156,23 @@ Yinxia/
       │  │  ├─ LibraryScreen.kt            歌曲列表（普通 / 多选 / 手动排序三种形态）
       │  │  ├─ SortSheet.kt                排序方式面板
       │  │  ├─ FolderSheet.kt              扫描范围面板
+      │  │  ├─ ThemeSheet.kt               默认主题色面板（10 色预设）
       │  │  ├─ MiniPlayer.kt               底部迷你播放条
       │  │  ├─ NowPlaying.kt               全屏播放页
       │  │  ├─ Artwork.kt                  封面组件（取不到封面就按歌曲 id 用渐变兜底）
       │  │  └─ theme/                      配色、字体、Material 3 主题
-      │  └─ util/Format.kt                 毫秒 → 3:07 / 1:02:45
+      │  │     ├─ AccentTheme.kt           按主题调整强调色；只覆盖 4 个色位
+      │  │     └─ AccentPalette.kt         默认主题色的 10 个固定预设
+      │  ├─ util/Format.kt                 毫秒 → 3:07 / 1:02:45
+      │  └─ widget/
+      │     ├─ PlayerWidget.kt            拼 RemoteViews 并推给桌面（按签名去重）
+      │     └─ PlayerWidgetProvider.kt    AppWidgetProvider：接收器 + 按钮点击
       └─ res/
-         ├─ drawable/ic_*.xml              自绘矢量图标（播放、暂停、排序、文件夹、删除…）
+         ├─ drawable/ic_*.xml              自绘矢量图标（播放、暂停、排序、文件夹、删除…；填充图形也带同色圆角描边）
+         ├─ layout/widget_player.xml       桌面插件布局（RemoteViews 只能用传统 View，不能用 Compose）
          ├─ mipmap-anydpi-v26/             自适应启动图标
-         └─ values/                        文案、颜色、主题
+         ├─ values/                        文案、颜色、主题
+         └─ xml/player_widget_info.xml     桌面插件声明（resizeMode 可自由拉伸）
 ```
 
 ### 几个设计上的取舍
@@ -147,8 +189,9 @@ Yinxia/
 
 | 想改什么 | 改哪 |
 |---|---|
-| 主色调 | `ui/theme/Color.kt` |
+| 主色调 | `ui/theme/Color.kt` 是基础配色；**默认强调色**（没有封面时用的那个）改 `ui/theme/AccentPalette.kt`，或者直接在 App 里点顶栏的调色板图标选 |
 | 用壁纸取色（Android 12+） | `ui/theme/Theme.kt` 里把 `dynamicColor` 默认值改成 `true` |
+| 桌面插件的外观 | `res/layout/widget_player.xml` + `res/values/colors.xml`（含 `values-night` 的深色值） |
 | 过滤掉更短的音频（默认 15 秒） | `MusicRepository.MIN_DURATION_MS` |
 | 进度刷新频率（默认 500ms） | `PlayerViewModel.PROGRESS_INTERVAL_MS` |
 | 封面缓存数量（默认 80 张） | `ArtworkLoader.CACHE_SIZE` |
@@ -166,12 +209,18 @@ Yinxia/
 | Kotlin | **2.2.10（不要改）** | AGP 9 内置 Kotlin，版本由 AGP 自带；AGP 9.4.1 的 POM 依赖 KGP 2.2.10。Compose 编译器插件必须与之**完全一致**，所以写 2.2.10 而不是更新的 2.4.x |
 | JDK | 17 | AGP 9.x 的最低和默认 JDK 都是 17；CI 里也钉的 17，不是 21 |
 | Compose BOM | 2026.09.00 | 统一决定 compose-ui(1.12.1) / material3 / foundation 版本，各库不写版本号 |
+| compose-animation | 跟随 BOM | 这次**唯一新加的依赖**：`androidx.compose.animation:animation`，版本由 Compose BOM 决定，不单独钉版本号。`animateColorAsState` 在 `animation` 里，**不在 `animation-core`** —— 主题色过渡要用它 |
 | Media3 | 1.11.1 | ExoPlayer + MediaSession |
 | lifecycle-viewmodel | 2.11.0 | 注意不要用 `lifecycle-viewmodel-ktx`——2.8 起它已经是空壳 |
 | kotlinx-coroutines | 不声明 | 由 compose-runtime 与 lifecycle-viewmodel 传递引入（1.9.0）。少一个版本号少一处坑 |
 | compileSdk | **37** | Compose 1.12 起**强制要求** compileSdk 37 + AGP 9，写 36 会直接构建失败 |
 | targetSdk | 36 | Android 16，对应你这台 HyperOS 3。compileSdk 和 targetSdk 不是一回事 |
 | minSdk | 26 | Android 8.0 |
+
+> 主题色跟随封面这一版只新增了**一个**依赖：`androidx.compose.animation:animation`
+> （在 `gradle/libs.versions.toml` 里不写版本号，跟 Compose BOM 走）。
+> `animateColorAsState` 住在 `animation` 里，**不在 `animation-core`** —— 引错模块会直接找不到符号。
+> 取色本身没有引 Palette，是 `data/ArtworkLoader.kt` 里自己算的。
 
 ### AGP 9 的两个坑（AGP 8 时代的知识在这里是错的）
 

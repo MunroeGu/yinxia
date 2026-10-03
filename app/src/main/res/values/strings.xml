@@ -56,4 +56,24 @@
     <string name="delete_title">删除歌曲</string>
     <string name="delete_message">将从设备上永久删除 %1$d 个音频文件。系统会再向你确认一次，删除后无法恢复。</string>
     <string name="delete_failed">删除失败，文件可能已被其他应用占用</string>
+
+    <string name="action_theme">主题色</string>
+    <string name="theme_title">默认主题色</string>
+    <string name="theme_message">歌曲有封面时，界面自动跟随封面颜色；没有封面时用下面选的颜色。深色模式下会自动调整明暗。</string>
+    <string name="theme_reset">不指定，用主题默认紫罗兰</string>
+    <string name="theme_selected">已选中</string>
+
+    <string name="accent_violet">紫罗兰</string>
+    <string name="accent_indigo">靛蓝</string>
+    <string name="accent_blue">湖蓝</string>
+    <string name="accent_cyan">青蓝</string>
+    <string name="accent_teal">青绿</string>
+    <string name="accent_green">松绿</string>
+    <string name="accent_amber">琥珀</string>
+    <string name="accent_orange">橘橙</string>
+    <string name="accent_red">绯红</string>
+    <string name="accent_pink">玫红</string>
+
+    <string name="widget_idle">未在播放</string>
+    <string name="widget_description">显示当前歌曲并控制播放，可自由调整大小</string>
 </resources>

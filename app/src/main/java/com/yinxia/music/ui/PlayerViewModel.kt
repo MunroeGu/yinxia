@@ -14,6 +14,7 @@ import com.yinxia.music.data.MusicRepository
 import com.yinxia.music.data.Song
 import com.yinxia.music.data.SortMode
 import com.yinxia.music.player.PlaybackConnection
+import com.yinxia.music.widget.PlayerWidget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +46,8 @@ data class LibraryUiState(
      * 退出后手动顺序依然生效，只是列表恢复成普通形态，不再显示任何拖拽相关的东西。
      */
     val manualEditing: Boolean = false,
+    /** 用户自定义的默认主题色（ARGB）；null = 用主题自带颜色 */
+    val defaultAccentArgb: Int? = null,
     /** false = 扫描全部文件夹；此时界面上的勾选一律显示为全选 */
     val folderFilterEnabled: Boolean = false,
     val selectedFolders: Set<String> = emptySet(),
@@ -96,6 +99,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             sortAscending = preferences.sortAscending,
             folderFilterEnabled = preferences.folderFilterEnabled,
             selectedFolders = preferences.selectedFolders,
+            defaultAccentArgb = preferences.defaultAccentArgb,
         ),
     )
     val library: StateFlow<LibraryUiState> = _library.asStateFlow()
@@ -207,12 +211,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val controller = connection.controller ?: return
 
         val currentSongId = controller.currentMediaItem?.mediaId?.toLongOrNull() ?: NO_SONG_ID
+        val song = _library.value.allSongs.firstOrNull { it.id == currentSongId }
         val playerDuration = controller.duration
         // 播放器还没解析出时长时，用扫描时拿到的时长兜底，进度条不会突然跳成 0
-        val fallbackDuration = _library.value.allSongs
-            .firstOrNull { it.id == currentSongId }
-            ?.durationMs
-            ?: 0L
+        val fallbackDuration = song?.durationMs ?: 0L
 
         _playback.update {
             it.copy(
@@ -225,6 +227,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 hasQueue = controller.mediaItemCount > 0,
             )
         }
+
+        // 桌面插件：内部会按"歌曲 + 播放状态"去重，
+        // 所以每秒两次的进度刷新不会造成重复推送
+        PlayerWidget.push(getApplication(), song, controller.isPlaying)
     }
 
     private fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
@@ -318,6 +324,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setQuery(query: String) {
         _library.update { it.copy(query = query) }
         recompute()
+    }
+
+    /** 设置默认主题色（只在歌曲没有封面时生效） */
+    fun setDefaultAccent(argb: Int?) {
+        preferences.defaultAccentArgb = argb
+        _library.update { it.copy(defaultAccentArgb = argb) }
     }
 
     fun setSortMode(mode: SortMode, ascending: Boolean) {
