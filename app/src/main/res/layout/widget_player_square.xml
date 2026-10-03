@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   接近正方形的插件用竖排：封面 / 歌名 / 歌手 / 一排等宽按钮。
-  封面是**固定正方形**（56dp），上下各放一个可伸缩的 View 吸收多余高度 ——
+  封面是**固定正方形**（56dp），上下各放一个可伸缩的空 LinearLayout 吸收多余高度 ——
   这样封面永远不会被拉成长方形（之前用 weight 撑高封面，方图被裁成竖条，看起来像被拉长）。
-  注意 RemoteViews 不允许 android.widget.Space，所以占位用普通 View。
+
+  ⚠️ 占位**只能用 RemoteViews 允许的控件**（LinearLayout / TextView / ImageView…）。
+  之前这里用的是普通 <View> 和 android.widget.Space，两个都不在允许列表里，
+  结果插件一被拉成 n×2（高度够 → 选中这个布局）就 inflate 失败，
+  桌面上直接显示"载入窗口小部件时出现问题"。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -14,7 +18,7 @@
     android:orientation="vertical"
     android:padding="8dp">
 
-    <View
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />
@@ -94,7 +98,7 @@
             android:tint="@color/widget_icon" />
     </LinearLayout>
 
-    <View
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />

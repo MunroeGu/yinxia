@@ -228,7 +228,13 @@ object PlayerWidget {
     }
 
     private fun commandIntent(context: Context, action: String, requestCode: Int): PendingIntent {
-        val intent = Intent(context, PlayerWidgetProvider::class.java).setAction(action)
+        // ⚠️ 必须是**隐式**广播：只带 action + 包名，不指定组件。
+        //
+        // 以前这里写的是 Intent(context, PlayerWidgetProvider::class.java)，那是显式广播 ——
+        // 显式广播只会送给这一个接收器，PlaybackService 里动态注册的接收器收不到；
+        // 而提供者又因为"服务活着"直接返回，于是**谁都没有执行命令**，
+        // 表现就是"状态能同步、按钮完全没反应"。
+        val intent = Intent(action).setPackage(context.packageName)
         return PendingIntent.getBroadcast(
             context,
             requestCode,

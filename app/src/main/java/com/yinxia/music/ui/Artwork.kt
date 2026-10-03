@@ -66,11 +66,13 @@ fun Artwork(
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
-            Icon(
-                painter = painterResource(R.drawable.ic_launcher_foreground),
+            // 没有封面就显示统一的默认封面（用户提供的那张插画）。
+            // 以前是用与歌曲 id 绑定的渐变色 + 音符兜底，看起来比较"空"。
+            Image(
+                painter = painterResource(R.drawable.cover_placeholder),
                 contentDescription = null,
-                tint = Color.White.copy(alpha = 0.85f),
-                modifier = Modifier.fillMaxSize(0.5f),
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
             )
         }
     }
