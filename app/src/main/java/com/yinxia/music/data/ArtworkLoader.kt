@@ -14,6 +14,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /**
@@ -25,10 +27,31 @@ import kotlinx.coroutines.withContext
 object ArtworkLoader {
 
     private const val CACHE_SIZE = 80
+
+    /** 同时解码上限，见 [decodeSemaphore] */
+    private const val MAX_CONCURRENT_DECODES = 3
+
+    /**
+     * 解码目标边长（px）。列表缩略图 48dp、迷你条 44dp，即使在 3x 屏上也只有 ~144px；
+     * 播放页大图约 0.72×屏宽，1080p 上 ~780px。这里沿用系统缩略图那条路径（Android 10+）
+     * 已经在用的 384px：对列表绰绰有余，对小内存设备也不会为了大图把原图整张读进来。
+     */
+    private const val MAX_DECODE_SIZE_PX = 384
+
     private val memoryCache = LruCache<Long, ImageBitmap>(CACHE_SIZE)
 
     /** 每首歌从封面里挑出的"种子色"（还没有按明暗主题调整），key 是歌曲 id */
     private val seedCache = LruCache<Long, Color>(CACHE_SIZE)
+
+    /**
+     * 同时最多允许 [MAX_CONCURRENT_DECODES] 个封面解码。
+     *
+     * 列表第一次渲染时，可见的十几行会同时发起请求；不设上限就是十几次大图解码
+     * 一起抢磁盘、CPU 和内存（每一次还要经过 loadThumbnail 的系统 IPC），
+     * 冷启动那"卡一下"多半就发生在这一瞬间。3 个足够把磁盘喂满，
+     * 又不会让内存分配和 GC 同时爆发。
+     */
+    private val decodeSemaphore = Semaphore(permits = MAX_CONCURRENT_DECODES)
 
     /** 同步取缓存，用于滚动时先显示已有封面，避免闪一下占位图。 */
     fun cached(songId: Long): ImageBitmap? = memoryCache.get(songId)
@@ -36,7 +59,7 @@ object ArtworkLoader {
     suspend fun load(context: Context, song: Song): ImageBitmap? {
         if (song.albumId <= 0L && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         memoryCache.get(song.id)?.let { return it }
-        val bitmap = withContext(Dispatchers.IO) { decode(context, song) } ?: return null
+        val bitmap = decodeLimited(context, song) ?: return null
         val image = bitmap.asImageBitmap()
         memoryCache.put(song.id, image)
         return image
@@ -52,7 +75,7 @@ object ArtworkLoader {
         seedCache.get(song.id)?.let { return it }
 
         val bitmap = memoryCache.get(song.id)?.asAndroidBitmap()
-            ?: withContext(Dispatchers.IO) { decode(context, song) }
+            ?: decodeLimited(context, song)
             ?: return null
 
         val seed = withContext(Dispatchers.Default) { extractDominantColor(bitmap) } ?: return null
@@ -65,17 +88,63 @@ object ArtworkLoader {
         seedCache.evictAll()
     }
 
+    /**
+     * 真正干活的解码入口。一定要跑在 [Dispatchers.IO] 上（由 [decodeLimited] 保证）：
+     * loadThumbnail 是跨进程 IPC + 解码，BitmapFactory 是纯 CPU/内存重活。
+     */
     private fun decode(context: Context, song: Song): Bitmap? = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // 系统这条路径本身就会按请求的尺寸缩放
             context.contentResolver.loadThumbnail(song.uri, THUMBNAIL_SIZE, null)
         } else {
-            @Suppress("DEPRECATION")
-            context.contentResolver.openInputStream(legacyAlbumArtUri(song.albumId))
-                ?.use { stream -> BitmapFactory.decodeStream(stream) }
+            decodeLegacyAlbumArt(context, song.albumId)
         }
     } catch (_: Throwable) {
         // 封面缺失、解码失败、权限边缘情况都当没有封面
         null
+    }
+
+    /** 统一走信号量 + IO 线程，避免列表首帧把设备一次性打满。 */
+    private suspend fun decodeLimited(context: Context, song: Song): Bitmap? =
+        decodeSemaphore.withPermit {
+            withContext(Dispatchers.IO) { decode(context, song) }
+        }
+
+    /**
+     * Android 9 及以下的退路：老的 albumart 表没有缩略图接口，只能自己读。
+     *
+     * 先只解图片头拿原始尺寸（inJustDecodeBounds，几乎不花内存），
+     * 再按 [inSampleSize] 缩到接近显示尺寸 —— 否则一张 3000×3000 的封面
+     * 按 ARGB_8888 解出来就是 36MB，而它在列表里只占 48dp。
+     */
+    @Suppress("DEPRECATION")
+    private fun decodeLegacyAlbumArt(context: Context, albumId: Long): Bitmap? {
+        val uri = legacyAlbumArtUri(albumId)
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, bounds)
+        } ?: return null
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, MAX_DECODE_SIZE_PX)
+        }
+        return context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, options)
+        }
+    }
+
+    /**
+     * inSampleSize 只能是 2 的幂。取满足"解码后两个方向都还不小于 [target]"的最大值，
+     * 也就是结果会落在 target~2×target 之间：绝不比需要的更大太多，也不会糊到不能用。
+     */
+    private fun sampleSizeFor(width: Int, height: Int, target: Int): Int {
+        var sample = 1
+        while (width / (sample * 2) >= target && height / (sample * 2) >= target) {
+            sample *= 2
+        }
+        return sample
     }
 
     /**

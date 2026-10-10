@@ -8,6 +8,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.yinxia.music.R
 import com.yinxia.music.data.FolderEntry
+import com.yinxia.music.data.LibraryCache
 import com.yinxia.music.data.LibraryPreferences
 import com.yinxia.music.data.MusicRepository
 import com.yinxia.music.data.Playlist
@@ -100,6 +101,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 等待系统删除确认的歌曲，删除结果回来后要用 */
     private var pendingDeleteSongs: List<Song> = emptyList()
 
+    /** 冷启动缓存只读一次：init 和 loadLibrary 都可能触发，避免重复解析同一份 JSON */
+    private var cacheRestored = false
+
     private val _library = MutableStateFlow(
         LibraryUiState(
             sortMode = preferences.sortMode,
@@ -119,6 +123,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 需要交给系统弹确认框的删除请求 */
     private val _pendingDelete = MutableStateFlow<List<Song>>(emptyList())
     val pendingDelete: StateFlow<List<Song>> = _pendingDelete.asStateFlow()
+
+    init {
+        // 进程刚起来时先把上次扫到的歌单摆上去，MediaStore 扫描随后在后台刷新。
+        // 第一次安装（还没有缓存文件）时这里什么也不做，加载/空列表语义和以前完全一致。
+        scope.launch { publishCachedLibrary() }
+    }
 
     private var progressJob: Job? = null
 
@@ -265,7 +275,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun loadLibrary() {
         scope.launch {
-            _library.update { it.copy(loading = true) }
+            // 缓存优先：先把上次的结果画出来，再让扫描在后台覆盖。
+            // 注意顺序 —— 先发布缓存再决定 loading，否则会把已经画好的列表盖回加载页。
+            publishCachedLibrary()
+            // 已经有内容（缓存或上一次的扫描结果）时不再显示加载页，列表不会闪成空白。
+            // 第一次安装没有缓存也没有旧结果，这里仍然是 true，语义和以前一致。
+            _library.update { it.copy(loading = it.allSongs.isEmpty()) }
+
             val songs = repository.loadSongs()
             syncManualOrder(songs)
             dropMissingSongsFromPlaylists(songs)
@@ -277,7 +293,43 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             recompute()
+
+            // 扫描成功才落盘。loadSongs() 在没权限 / MediaStore 异常时也返回空列表，
+            // 那种"空"不是真的空库，写进去会把好不容易攒下的缓存清掉。
+            if (songs.isNotEmpty()) LibraryCache.save(getApplication<Application>(), songs)
         }
+    }
+
+    /**
+     * 冷启动时把上次扫描的结果立刻发布出来，界面不用干等 MediaStore。
+     *
+     * - 用 [cacheRestored] 保证只读一次：init 和 [loadLibrary] 都会调，不会重复解析；
+     * - 已经有歌曲时直接跳过，避免拿旧数据盖掉刚扫出来的新结果。
+     *
+     * @return 是否真的用缓存填上了列表
+     */
+    private suspend fun publishCachedLibrary(): Boolean {
+        if (cacheRestored) return false
+        cacheRestored = true
+        if (_library.value.allSongs.isNotEmpty()) return false
+
+        val cached = LibraryCache.load(getApplication<Application>()) ?: return false
+        // 解析是挂起的，期间可能已经有扫描结果回来了，发布前再确认一次
+        if (_library.value.allSongs.isNotEmpty()) return false
+
+        syncManualOrder(cached)
+        // 刻意不在这里 dropMissingSongsFromPlaylists：缓存可能比真实库旧，
+        // 拿旧数据去删歌单条目是会落盘的破坏性操作，等下面真正扫完再清理。
+        _library.update {
+            it.copy(
+                allSongs = cached,
+                // 文件夹列表本来也只是从歌曲汇总出来的，不需要重新扫描
+                folders = MusicRepository.buildFolders(cached),
+                loading = false,
+            )
+        }
+        recompute()
+        return true
     }
 
     /**

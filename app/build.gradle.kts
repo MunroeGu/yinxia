@@ -17,8 +17,8 @@ android {
         minSdk = 26
         // 36 = Android 16，正好对应 HyperOS 3 那台机器
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     buildTypes {

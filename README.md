@@ -172,6 +172,30 @@
   因为歌单**只存 id**，被删掉或者不在扫描范围内的歌会被直接忽略，不会留下坏条目。
   > 一个歌单被清空后 chip 行**仍然显示**，所以永远能切回「全部」，不会卡在空歌单里出不来。
 
+**冷启动优化（列表几乎立刻可见）：**
+
+- **主因：以前每次冷启动都要等一次完整的 MediaStore 扫描。** 列表一直停在加载页，扫描没结束就什么都不显示，
+  因为扫描结果从来没有被持久化过。现在新增 `data/LibraryCache.kt`，把上一次扫出来的整个音乐库以 JSON
+  存到 `filesDir/library_cache.json`：用 `org.json` 手写序列化，**没有引新依赖**；`save` / `load` 都在
+  `Dispatchers.IO` 上跑；每个字段都用 `opt*` 读，所以**以后往 JSON 里加字段也不会让老缓存解析失败**。
+  `PlayerViewModel` 新增 `publishCachedLibrary()`（在 `init` 预热和 `loadLibrary()` 开头各调一次），
+  先把缓存列表发出去，再在后台跑正常扫描并回写缓存。
+  > **结果**：从第二次启动起，列表**几十毫秒**就出来，扫描退到后台刷新；
+  > `loading` 也改成了 `allSongs.isEmpty()`，已经有内容的列表不会再闪一次全屏加载页。
+  > **两个刻意保留的细节**：① 缓存**只在扫描结果非空时才写**——空结果和"没权限 / MediaStore 出错"分不出来，
+  > 写进去会把一份好缓存抹掉；② 缓存恢复那条路径**故意不跑 `dropMissingSongsFromPlaylists`**——
+  > 它会写 SharedPreferences，拿可能过期的缓存数据去跑会删掉歌单条目，所以这一步只等真正的扫描完成后再做。
+- **次因（Android 12 以下）：老路径按原尺寸解码封面。** `ArtworkLoader` 的 legacy 路径（API 26–28）
+  以前是直接 `BitmapFactory` 解整张专辑封面、不传任何 `BitmapFactory.Options`——
+  一张 3000×3000 的封面就是 **~36 MB**。现在改成**两趟解码**（先 `inJustDecodeBounds`）配 `inSampleSize`，
+  目标 **384 px**，和 Android 10+ 那条 `loadThumbnail(Size(384, 384))` 路径保持一致。
+- **次因（并发）：以前封面解码数量不受限。** 首屏一帧就可能同时发起 10–15 个解码。
+  现在 `ArtworkLoader` 把每个解码都包进一个 `kotlinx.coroutines.sync.Semaphore(3)`（`decodeLimited`），
+  同一时刻最多三个在跑。
+- **已知残留（这次没改）**：`recompute()` 里的 `sortedBy { it.title.lowercase() }` 和
+  `MusicRepository.buildFolders` **仍然在主线程上**。数千首歌时是几十到几百毫秒的残留卡顿，
+  **属于后续可优化项，不要当成已经解决。**
+
 **目前没做**：收藏、文件夹层级浏览（只有扫描范围，没有按文件夹分组的视图）、均衡器、歌词、按专辑/歌手分组、独立播放队列（队列就是当前显示的列表）。这里更正一处：**播放列表已经做了**（用户自建歌单，见上文），没做的只剩**收藏和队列管理**。
 
 ---
@@ -202,6 +226,20 @@
 > - 云端路线不受影响：workflow 用 `gradle/actions/setup-gradle` 直接安装 Gradle 9.6.0，不依赖 wrapper。
 > - 本地路线：Android Studio 打开时会提示"创建 Gradle wrapper"，同意即可；或者用装了 Gradle 9.6.0 的机器跑一次 `gradle wrapper`。
 >   国内网络慢的话，建议配国内 Maven 镜像加速依赖下载。
+
+### 覆盖安装（按版本更新）
+
+Android 只允许**和已安装版本同签名**的 APK 原地覆盖安装。以前每次 CI 运行都会新生成一个
+`~/.android/debug.keystore`，签名每次都不同，所以装一个新构建必须先卸载旧版——歌单和设置一起没了。
+
+现在 `.github/workflows/build-debug-apk.yml` 里多了一步 `actions/cache@v4`：
+`path: ~/.android/debug.keystore`，固定 key `android-debug-keystore-v1`，
+把同一个 keystore 钉在多次构建之间；`app/build.gradle.kts` 同时升到 `versionCode 2` / `versionName "1.1"`，
+这样更新才是可识别的版本号。
+
+> ⚠️ **两点如实说明**：① 这次改动**之前**已经装在手机上的那个构建，是用一个**我们已经复现不出来的密钥**签的，
+> 所以**启用这套机制需要最后卸载一次**——卸载干净之后，后续更新才能原地覆盖安装（歌单和设置从此得以保留）；
+> ② GitHub 的 cache 连续 7 天不用会被清掉，真被清掉时 keystore 会重新生成，那就又要卸载一次。
 
 ---
 
@@ -241,6 +279,7 @@ Yinxia/
       │  │  ├─ FolderEntry.kt              一个含音频的文件夹
       │  │  ├─ Playlist.kt                 自建歌单（只存歌曲 id）
       │  │  ├─ LibraryPreferences.kt       排序/扫描范围/手动顺序/播放队列的持久化
+      │  │  ├─ LibraryCache.kt             音乐库本地缓存：冷启动先画上次的结果，扫描随后在后台刷新
       │  │  ├─ MusicRepository.kt          用 MediaStore 扫描本地音频 + 汇总文件夹
       │  │  └─ ArtworkLoader.kt            封面解码 + 内存 LRU 缓存 + 提主题种子色（自己写的直方图取色，没引 Palette）
       │  ├─ player/
@@ -298,6 +337,7 @@ Yinxia/
 | 过滤掉更短的音频（默认 15 秒） | `MusicRepository.MIN_DURATION_MS` |
 | 进度刷新频率（默认 500ms） | `PlayerViewModel.PROGRESS_INTERVAL_MS` |
 | 封面缓存数量（默认 80 张） | `ArtworkLoader.CACHE_SIZE` |
+| 冷启动先显示什么 | `data/LibraryCache.kt` + `PlayerViewModel.publishCachedLibrary()`（缓存优先：先画上次的列表，扫描在后台刷新）；以及 `ArtworkLoader` 里的并发数（`Semaphore(3)`）与解码目标尺寸常量（384px） |
 | 歌曲信息显示哪些字段 | `util/SongDetails.kt` 的 `songDetailLines`（两行各放什么、拼接顺序与单位都在这里） |
 | 应用名 / 包名 | `res/values/strings.xml` 的 `app_name`；包名要同步改 `build.gradle.kts` 的 `namespace`、`applicationId` 和 Kotlin 的 package |
 | 启动图标 | 图标插画是 `res/mipmap-xxxhdpi/ic_launcher_foreground.png`，外面由 `res/drawable/ic_launcher_image.xml` 包一层 17% inset（自适应图标会裁掉四周约 1/6，这个 inset 就是把人脸收进蒙版安全区的关键）；背景色是 `res/values/colors.xml` 的 `ic_launcher_background` |
