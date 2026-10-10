@@ -162,8 +162,12 @@ class MusicRepository(private val context: Context) {
                 .map { (key, group) ->
                     FolderEntry(key = key, displayName = group.first().folderName, songCount = group.size)
                 }
-                .sortedWith(
-                    compareBy<FolderEntry>({ it.displayName.lowercase() }, { it.key }),
-                )
+                // 和 PlayerViewModel.recompute() 一样避开 sortedBy/compareBy 的
+                // 每次比较一次 lowercase() 分配：这个方法是在主线程上、扫描刚结束
+                // （用户开始滚列表）那一刻被调用的。
+                .sortedWith { a, b ->
+                    val byName = a.displayName.compareTo(b.displayName, ignoreCase = true)
+                    if (byName != 0) byName else a.key.compareTo(b.key)
+                }
     }
 }

@@ -32,6 +32,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,7 +70,13 @@ fun YinxiaApp(
     val playback by viewModel.playback.collectAsState()
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
-    val playingSong = library.allSongs.firstOrNull { it.id == playback.currentSongId }
+
+    // PlaybackUiState 是一个整体，播放中每 500ms 就会换一个新实例（positionMs 在变）。
+    // 如果在这里直接读 playback.currentSongId，整个 YinxiaApp 作用域会跟着进度条
+    // 一起重组 2 次/秒，再一路带到下面的列表。derivedStateOf 只在"取出来的值真的
+    // 变了"时才通知读取者，于是进度 tick 被挡在门外，切歌时照常生效。
+    val currentSongId by remember { derivedStateOf { playback.currentSongId } }
+    val playingSong = library.allSongs.firstOrNull { it.id == currentSongId }
 
     // 主题色优先跟随当前播放歌曲的封面；没有封面就退回用户自选的默认色
     var coverSeed by remember { mutableStateOf<Color?>(null) }
@@ -110,6 +117,14 @@ private fun YinxiaAppContent(
     val playback by viewModel.playback.collectAsState()
     val pendingDelete by viewModel.pendingDelete.collectAsState()
 
+    // 同上：把"值其实没变"的字段从每 500ms 一次的进度 tick 里摘出来。
+    // 以前 currentSongId 在函数体顶部、isPlaying 在 Scaffold 的 content lambda 里
+    // 直接读 playback，两者都会因为 positionMs 变化而失效；content lambda 一旦失效，
+    // 里面的 LibraryScreen（参数里有 List<Song>，不可跳过）就会整个重组，
+    // 正在滚动的可见行跟着重建 —— 播放时的滚动掉帧就是这么来的。
+    val currentSongId by remember { derivedStateOf { playback.currentSongId } }
+    val isPlaying by remember { derivedStateOf { playback.isPlaying } }
+
     var searchVisible by remember { mutableStateOf(false) }
     var showNowPlaying by remember { mutableStateOf(false) }
     var showSortSheet by remember { mutableStateOf(false) }
@@ -144,7 +159,7 @@ private fun YinxiaAppContent(
     }
 
     // 正在播放的歌可能被扫描范围过滤掉了，所以从全量列表里找
-    val currentSong = library.allSongs.firstOrNull { it.id == playback.currentSongId }
+    val currentSong = library.allSongs.firstOrNull { it.id == currentSongId }
     // 只有"进入拖动状态"时列表才是可排序的；平时即便排序方式是手动，也不显示任何多余控件
     val manualSorting = library.manualEditing
 
@@ -323,7 +338,7 @@ private fun YinxiaAppContent(
             if (currentSong != null) {
                 MiniPlayer(
                     song = currentSong,
-                    isPlaying = playback.isPlaying,
+                    isPlaying = isPlaying,
                     progress = playback.progress,
                     onExpand = { showNowPlaying = true },
                     onTogglePlay = viewModel::togglePlayPause,
@@ -389,8 +404,8 @@ private fun YinxiaAppContent(
                     )
                     LibraryScreen(
                         songs = library.songs,
-                        currentSongId = playback.currentSongId,
-                        isPlaying = playback.isPlaying,
+                        currentSongId = currentSongId,
+                        isPlaying = isPlaying,
                         selectionMode = library.selectionMode,
                         selectedIds = library.selectedSongIds,
                         sorting = manualSorting,

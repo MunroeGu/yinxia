@@ -285,14 +285,36 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             val songs = repository.loadSongs()
             syncManualOrder(songs)
             dropMissingSongsFromPlaylists(songs)
-            _library.update {
-                it.copy(
-                    allSongs = songs,
-                    folders = MusicRepository.buildFolders(songs),
-                    loading = false,
-                )
+
+            // 缓存优先让列表在扫描结束之前就画好了，用户很可能正拖着它滚动。
+            // 这时如果扫描结果和屏幕上那份完全一样（按 id 顺序逐一比较），就绝不能
+            // 再碰 allSongs / folders / songs：那会换掉整份数据、让 LazyColumn 在
+            // 滚动途中重建每一个可见行 —— 用户看到的就是"列表已经出来了，一拖还是卡"。
+            // 内容没变时只把 loading 收掉，其余一概不动（顺带也省掉了主线程上的
+            // buildFolders 与 recompute 排序）。别把这层判断"简化"回无条件更新。
+            //
+            // 顺带比较 title：只比 id 的话，在外面改了标签（id 不变、标题变了）就永远
+            // 不会刷新那一行。title 是 String，比较不分配内存，代价可以忽略。
+            // 其余字段（专辑、时长…）即使变了也不影响这一行是否需要重画，
+            // 而且缓存每次扫描都会重写，下次启动读到的就是新数据。
+            val current = _library.value.allSongs
+            val unchanged = songs.size == current.size &&
+                songs.indices.all {
+                    songs[it].id == current[it].id && songs[it].title == current[it].title
+                }
+
+            if (unchanged) {
+                _library.update { it.copy(loading = false) }
+            } else {
+                _library.update {
+                    it.copy(
+                        allSongs = songs,
+                        folders = MusicRepository.buildFolders(songs),
+                        loading = false,
+                    )
+                }
+                recompute()
             }
-            recompute()
 
             // 扫描成功才落盘。loadSongs() 在没权限 / MediaStore 异常时也返回空列表，
             // 那种"空"不是真的空库，写进去会把好不容易攒下的缓存清掉。
@@ -343,7 +365,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val known = manualOrder.toHashSet()
         val added = all.asSequence()
             .filter { it.id !in known }
-            .sortedBy { it.title.lowercase() }
+            // 同理不用 sortedBy { it.title.lowercase() }：每次比较一个字符串
+            .sortedWith { a, b -> a.title.compareTo(b.title, ignoreCase = true) }
             .map { it.id }
             .toList()
         if (added.isNotEmpty()) manualOrder.addAll(added)
@@ -410,16 +433,32 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             folderOk && playlistOk && queryOk
         }
 
+        // 三种排序都用 sortedWith + compareTo，不用 sortedBy/compareBy：
+        // 后者会把选择器的返回值装箱，标题那一项还会为**每一次比较**新建一个
+        // lowercase() 字符串。排序是 N log N，几千首歌就是几万次分配，全部堆在
+        // 主线程上（scope 是 Dispatchers.Main.immediate）扫描刚结束的那一瞬间，
+        // 正好砸在用户开始拖列表的时候。
+        // String.compareTo(other, ignoreCase = true) 与 Long.compareTo 都不分配。
         val ordered = when (state.sortMode) {
-            SortMode.TITLE -> filtered.sortedBy { it.title.lowercase() }
+            SortMode.TITLE -> filtered.sortedWith { a, b ->
+                a.title.compareTo(b.title, ignoreCase = true)
+            }
 
-            SortMode.DATE_ADDED -> filtered.sortedBy { it.dateAddedMs }
+            SortMode.DATE_ADDED -> filtered.sortedWith { a, b ->
+                a.dateAddedMs.compareTo(b.dateAddedMs)
+            }
 
             SortMode.MANUAL -> {
                 val orderIndex = manualOrder.withIndex().associate { (index, id) -> id to index }
-                filtered.sortedWith(
-                    compareBy<Song>({ orderIndex[it.id] ?: Int.MAX_VALUE }, { it.title.lowercase() }),
-                )
+                filtered.sortedWith { a, b ->
+                    val byOrder = (orderIndex[a.id] ?: Int.MAX_VALUE)
+                        .compareTo(orderIndex[b.id] ?: Int.MAX_VALUE)
+                    if (byOrder != 0) {
+                        byOrder
+                    } else {
+                        a.title.compareTo(b.title, ignoreCase = true)
+                    }
+                }
             }
         }
 

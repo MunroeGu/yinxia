@@ -190,11 +190,19 @@
   一张 3000×3000 的封面就是 **~36 MB**。现在改成**两趟解码**（先 `inJustDecodeBounds`）配 `inSampleSize`，
   目标 **384 px**，和 Android 10+ 那条 `loadThumbnail(Size(384, 384))` 路径保持一致。
 - **次因（并发）：以前封面解码数量不受限。** 首屏一帧就可能同时发起 10–15 个解码。
-  现在 `ArtworkLoader` 把每个解码都包进一个 `kotlinx.coroutines.sync.Semaphore(3)`（`decodeLimited`），
-  同一时刻最多三个在跑。
-- **已知残留（这次没改）**：`recompute()` 里的 `sortedBy { it.title.lowercase() }` 和
-  `MusicRepository.buildFolders` **仍然在主线程上**。数千首歌时是几十到几百毫秒的残留卡顿，
-  **属于后续可优化项，不要当成已经解决。**
+  现在 `ArtworkLoader` 把每个解码都包进一个 `kotlinx.coroutines.sync.Semaphore`（`decodeLimited`）。
+  上限**从 3 放宽到 6**：Android 10+ 走的 `loadThumbnail(uri, Size(384, 384))` 单次解码本来就很便宜，
+  3 个许可会让滚动时封面一张张慢慢"挤"出来；6 只是一道防病态突发的护栏，
+  API 26–28 老路径的内存问题已经由上面的 `inSampleSize` 两趟解码兜底，不再靠压低并发解决。
+- **已修（排序分配）：** `recompute()` 的三种排序、`syncManualOrder`、`MusicRepository.buildFolders`
+  以前都用 `sortedBy` / `compareBy` + `title.lowercase()` —— **每一次比较**都要新建一个 lowercase 字符串
+  （还附带 `Long`/`Int` 装箱）。现在统一换成零分配的 `sortedWith { a, b -> … compareTo(…, ignoreCase = true) }`。
+- **已修（扫描结束撞上滚动）：** 缓存优先之后列表早就画好了，扫描回来时用户可能正在拖它。
+  `loadLibrary()` 现在会先把扫描结果和当前显示按 id 顺序比一遍，**一样就什么都不更新**（只收掉 `loading`），
+  不再无条件换掉 `allSongs` / `folders` / `songs` —— 那会让 LazyColumn 在滚动途中重建每一个可见行。
+- **已知残留（这次仍然没改）**：上面这些排序和文件夹汇总**依旧跑在主线程上**
+  （`loadLibrary` 的 scope 是 `Dispatchers.Main.immediate`）。分配已经去掉了，但数千首歌时排序本身的
+  CPU 时间还没有挪到后台，**属于后续可优化项，不要当成已经解决。**
 
 **目前没做**：收藏、文件夹层级浏览（只有扫描范围，没有按文件夹分组的视图）、均衡器、歌词、按专辑/歌手分组、独立播放队列（队列就是当前显示的列表）。这里更正一处：**播放列表已经做了**（用户自建歌单，见上文），没做的只剩**收藏和队列管理**。
 

@@ -29,7 +29,7 @@ object ArtworkLoader {
     private const val CACHE_SIZE = 80
 
     /** 同时解码上限，见 [decodeSemaphore] */
-    private const val MAX_CONCURRENT_DECODES = 3
+    private const val MAX_CONCURRENT_DECODES = 6
 
     /**
      * 解码目标边长（px）。列表缩略图 48dp、迷你条 44dp，即使在 3x 屏上也只有 ~144px；
@@ -46,10 +46,15 @@ object ArtworkLoader {
     /**
      * 同时最多允许 [MAX_CONCURRENT_DECODES] 个封面解码。
      *
-     * 列表第一次渲染时，可见的十几行会同时发起请求；不设上限就是十几次大图解码
-     * 一起抢磁盘、CPU 和内存（每一次还要经过 loadThumbnail 的系统 IPC），
-     * 冷启动那"卡一下"多半就发生在这一瞬间。3 个足够把磁盘喂满，
-     * 又不会让内存分配和 GC 同时爆发。
+     * 这是一道"防止病态突发"的护栏，不是给常见路径调的性能参数：
+     * Android 10+ 走的是 contentResolver.loadThumbnail(uri, Size(384,384))，
+     * 系统按请求尺寸缩好再返回，单次解码本来就很便宜 —— 3 个许可太少，
+     * 滚动时封面会肉眼可见地一张张慢慢"挤"出来，所以放宽到 6。
+     *
+     * 真正怕把内存和 GC 打爆的是 API 26~28 的老 albumart 路径（要自己读原图），
+     * 但那条路已经由 [decodeLegacyAlbumArt] 的两遍 inSampleSize 解码保护住了，
+     * 不需要再靠压低并发来兜底。所以这里是放宽上限，不是取消上限：
+     * 冷启动可见的十几行同时发起请求时，仍然不会被一次性放开。
      */
     private val decodeSemaphore = Semaphore(permits = MAX_CONCURRENT_DECODES)
 

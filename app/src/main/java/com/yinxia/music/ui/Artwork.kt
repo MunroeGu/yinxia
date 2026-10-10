@@ -49,12 +49,18 @@ fun Artwork(
         }
     }
 
-    val gradient = gradientFor(song?.id ?: 0L)
+    // 占位渐变只跟歌曲有关，不随重组变。以前每次重组都要新建一个 Pair
+    // （gradientFor）+ 一个 List + 一个 Brush；列表滚动时每行每帧都会走到这里，
+    // 纯属给 GC 添活。remember 住它，滚动的绘制路径上就没有这次分配了。
+    val gradientBrush = remember(song?.id) {
+        val gradient = gradientFor(song?.id ?: 0L)
+        Brush.linearGradient(listOf(gradient.first, gradient.second))
+    }
 
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(cornerRadius))
-            .background(Brush.linearGradient(listOf(gradient.first, gradient.second))),
+            .background(gradientBrush),
         contentAlignment = Alignment.Center,
     ) {
         val bitmap = image
