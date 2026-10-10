@@ -8,6 +8,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # 发布 Release 需要写权限（默认的 GITHUB_TOKEN 是只读的）
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -66,3 +70,24 @@ jobs:
           name: yinxia-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      # 把 APK 发布到 Release。
+      #
+      # 为什么需要这一步：Actions 的 Artifact 下载**强制要求登录 GitHub**
+      #（即使是公开仓库也一样），手机上经常点了没反应，而且 Artifact 90 天后过期。
+      # Release 的资源不需要登录、不过期、还是直接就是 .apk（不用解压），
+      # 于是可以固定用一个永久直链下载最新版：
+      #   https://github.com/MunroeGu/yinxia/releases/latest/download/yinxia.apk
+      #
+      # 用固定 tag "apk" 做滚动发布：每次推送都覆盖同一个 Release 的同一个资源名，
+      # 所以上面的链接永远指向最新构建。
+      - name: Publish APK to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk yinxia.apk
+          gh release view apk > /dev/null 2>&1 || gh release create apk \
+            --title "肥鱼之声 APK" \
+            --notes "每次推送到 main 都会自动覆盖这里的 yinxia.apk，所以下载到的永远是提示里的最新版本。" \
+            --latest
+          gh release upload apk yinxia.apk --clobber
