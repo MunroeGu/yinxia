@@ -25,6 +25,20 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
+      # 固定复用同一把调试签名密钥。
+      #
+      # 为什么必须这么做：Android 只允许"同一签名"覆盖安装。默认情况下每次构建
+      # 都会新生成一把 debug.keystore，于是手机上必须卸载旧版才能装新版（歌单、设置全丢）。
+      # 把这个文件缓存起来之后，所有构建都用同一把密钥，之后就能按版本覆盖安装了。
+      #
+      # 注意：GitHub 的缓存超过 7 天不用会被清理，那时会重新生成密钥，
+      # 又需要卸载安装一次。第一次启用此步骤后，也需要卸载一次（旧 APK 的签名对不上）。
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       # Gradle 的完整日志很大，GitHub 会把整个步骤的日志截断
       #（"This step has been truncated due to its large size"），
       # 而截断掉的正好是最前面、最关键的报错行。
