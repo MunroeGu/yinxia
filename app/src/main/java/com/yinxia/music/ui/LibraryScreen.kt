@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.yinxia.music.R
+import com.yinxia.music.data.ArtworkLoader
 import com.yinxia.music.data.Song
 import com.yinxia.music.util.formatDuration
 import com.yinxia.music.util.songDetailLines
@@ -280,7 +281,13 @@ private fun SongRow(
             Spacer(Modifier.width(4.dp))
         }
 
-        Artwork(song = song, modifier = Modifier.size(48.dp), cornerRadius = 10.dp)
+        // 48dp 的行只需要 ~144px，解码小图能省掉约 5/6 的像素量
+        Artwork(
+            song = song,
+            modifier = Modifier.size(48.dp),
+            cornerRadius = 10.dp,
+            targetPx = ArtworkLoader.SMALL_PX,
+        )
         Spacer(Modifier.width(14.dp))
 
         Column(

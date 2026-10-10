@@ -10,6 +10,7 @@ import com.yinxia.music.R
 import com.yinxia.music.data.FolderEntry
 import com.yinxia.music.data.LibraryCache
 import com.yinxia.music.data.LibraryPreferences
+import com.yinxia.music.data.MediaStoreFingerprint
 import com.yinxia.music.data.MusicRepository
 import com.yinxia.music.data.Playlist
 import com.yinxia.music.data.Song
@@ -104,6 +105,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 冷启动缓存只读一次：init 和 loadLibrary 都可能触发，避免重复解析同一份 JSON */
     private var cacheRestored = false
 
+    /** 冷启动那次"用缓存填列表"的任务，loadLibrary 要先等它结束才知道列表是不是已经画出来了 */
+    private var cachePublishJob: Job? = null
+
+    /**
+     * 冷启动的缓存里那份媒体库指纹。只对"进程起来后的第一次扫描"有意义，读过就清掉。
+     * 和当前指纹一致时，缓存就是权威数据，可以直接跳过整段扫描（FIX 5）。
+     */
+    private var cachedFingerprint: MediaStoreFingerprint? = null
+
+    /**
+     * 冷启动时是否真的用缓存把列表画到了屏幕上。只对第一次扫描有意义，读过就清掉 ——
+     * 删除歌曲后重新扫描时列表本来就在屏幕上，不该再为"给滚动让路"多等 1.5 秒。
+     */
+    private var publishedFromCacheAtStart = false
+
     private val _library = MutableStateFlow(
         LibraryUiState(
             sortMode = preferences.sortMode,
@@ -127,7 +143,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     init {
         // 进程刚起来时先把上次扫到的歌单摆上去，MediaStore 扫描随后在后台刷新。
         // 第一次安装（还没有缓存文件）时这里什么也不做，加载/空列表语义和以前完全一致。
-        scope.launch { publishCachedLibrary() }
+        cachePublishJob = scope.launch { publishedFromCacheAtStart = publishCachedLibrary() }
     }
 
     private var progressJob: Job? = null
@@ -275,13 +291,47 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun loadLibrary() {
         scope.launch {
+            // 冷启动时 init 已经在读缓存了。先等它结束：只有确认列表已经（或马上就会）
+            // 由缓存画到屏幕上，才能判断这次扫描该不该跳过/让路。不等它的话，扫描会先于
+            // 缓存发布开始，"给滚动让路"根本不会生效。
+            cachePublishJob?.join()
+
             // 缓存优先：先把上次的结果画出来，再让扫描在后台覆盖。
             // 注意顺序 —— 先发布缓存再决定 loading，否则会把已经画好的列表盖回加载页。
-            publishCachedLibrary()
+            val fromCache = publishedFromCacheAtStart || publishCachedLibrary()
+            publishedFromCacheAtStart = false
+            val fingerprintFromCache = cachedFingerprint
+            cachedFingerprint = null
+
             // 已经有内容（缓存或上一次的扫描结果）时不再显示加载页，列表不会闪成空白。
             // 第一次安装没有缓存也没有旧结果，这里仍然是 true，语义和以前一致。
             _library.update { it.copy(loading = it.allSongs.isEmpty()) }
 
+            // ---------------------------------------------------------------- FIX 5
+            // 缓存里记着落盘那一刻的媒体库指纹。指纹一致（且缓存确实有歌）时，
+            // 我们的列表就是权威数据，整段扫描可以直接不做 —— 这正是"刚进 App
+            // 立刻拖列表卡"的根因：扫描不再发生，也就没有资源去和滚动抢。
+            //
+            // 只在指纹"已知"时才敢跳过：API < 30 没有 generation，readFingerprint()
+            // 返回 UNKNOWN（isKnown = false），老设备的行为和以前完全一样（每次都扫）。
+            val currentFingerprint = repository.readFingerprint()
+            if (fingerprintFromCache != null &&
+                fingerprintFromCache.isKnown &&
+                fingerprintFromCache == currentFingerprint &&
+                _library.value.allSongs.isNotEmpty()
+            ) {
+                _library.update { it.copy(loading = false) }
+                return@launch
+            }
+
+            // 缓存已经把列表画出来了，刷新不急；等一小会儿再扫，
+            // 免得用户刚进来第一次滚动正好和扫描抢资源（用户反馈就是这个时机最卡）。
+            // 第一次安装没有缓存时必须立刻扫，否则用户什么都看不到。
+            if (fromCache) delay(FIRST_SCAN_DELAY_MS)
+
+            // 扫描前先记一份指纹：媒体库如果在这中间被改动，"之前"和"之后"就对不上，
+            // 我们宁可不写缓存（见下面），也好过把"新的指纹 + 旧的歌单"存下去。
+            val fingerprintBeforeScan = repository.readFingerprint()
             val songs = repository.loadSongs()
             syncManualOrder(songs)
             dropMissingSongsFromPlaylists(songs)
@@ -318,7 +368,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
             // 扫描成功才落盘。loadSongs() 在没权限 / MediaStore 异常时也返回空列表，
             // 那种"空"不是真的空库，写进去会把好不容易攒下的缓存清掉。
-            if (songs.isNotEmpty()) LibraryCache.save(getApplication<Application>(), songs)
+            //
+            // 指纹一起存，但只在"扫描前后指纹没变"时才存。否则可能是扫描期间媒体库
+            // 又被改了 —— 那样写下去就成了"新指纹 + 旧歌单"，下次启动会误判成没变而
+            // 跳过扫描，刚加进来的歌就永远看不到了。宁可不更新缓存（下次启动照常扫描）。
+            if (songs.isNotEmpty()) {
+                val fingerprintAfterScan = repository.readFingerprint()
+                if (fingerprintAfterScan == fingerprintBeforeScan) {
+                    LibraryCache.save(
+                        getApplication<Application>(),
+                        songs,
+                        fingerprintAfterScan,
+                    )
+                }
+            }
         }
     }
 
@@ -335,7 +398,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         cacheRestored = true
         if (_library.value.allSongs.isNotEmpty()) return false
 
-        val cached = LibraryCache.load(getApplication<Application>()) ?: return false
+        val snapshot = LibraryCache.load(getApplication<Application>()) ?: return false
+        val cached = snapshot.songs
         // 解析是挂起的，期间可能已经有扫描结果回来了，发布前再确认一次
         if (_library.value.allSongs.isNotEmpty()) return false
 
@@ -351,6 +415,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         recompute()
+        // 指纹交给 loadLibrary：它据此决定这次要不要真的扫（FIX 5）
+        cachedFingerprint = snapshot.fingerprint
         return true
     }
 
@@ -695,7 +761,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         removeDeletedFromQueue(deleted.mapTo(HashSet()) { it.id })
         clearSelection()
-        loadLibrary()
+        // 删除改变了媒体库。先把缓存里的指纹抹掉（用 UNKNOWN 覆盖写一次），再去重新扫描。
+        // 顺序不能反，而且必须等写盘完成：
+        //  - 若这次扫描失败（没权限 / MediaStore 异常），或者期间进程被杀，
+        //    磁盘上留下的是"旧歌单 + 未知指纹"，下次启动照样会重新扫描；
+        //  - 反过来先扫描再抹指纹，一旦扫描失败，磁盘上仍是"旧歌单 + 能对上的旧指纹"，
+        //    下次启动就会跳过扫描，被删掉的歌又出现在列表里（点了也没反应）。
+        scope.launch {
+            LibraryCache.save(
+                getApplication<Application>(),
+                _library.value.allSongs,
+                MediaStoreFingerprint.UNKNOWN,
+            )
+            loadLibrary()
+        }
     }
 
     /**
@@ -746,5 +825,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private companion object {
         const val PROGRESS_INTERVAL_MS = 500L
+
+        /**
+         * 缓存已经把列表画出来时，首次扫描推迟这么久才开始。
+         *
+         * 1.5s 是"够用户把第一次滚动做完、又不至于让新歌迟到太久"的折中：
+         * 冷启动后用户第一波拖动通常就在这半秒到一秒多之间，把扫描错开这一段，
+         * 滚动就不会和 MediaStore 抢 CPU/IO。第一次安装（没有缓存）时不延迟。
+         */
+        const val FIRST_SCAN_DELAY_MS = 1500L
     }
 }

@@ -8,6 +8,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
+ * 当前媒体库的"指纹"：每个外部卷的 MediaStore version + generation。
+ *
+ * 用途见 [MusicRepository.readFingerprint]：和缓存里记下的那一份完全一致时，
+ * 缓存就是权威数据，可以整段跳过扫描。
+ */
+data class MediaStoreFingerprint(val volumes: Map<String, VolumeStamp>) {
+
+    data class VolumeStamp(val version: String, val generation: Long)
+
+    /** 平台不支持（API < 30）或读取失败：永不匹配，保证退回"每次都扫"的老行为 */
+    val isKnown: Boolean get() = volumes.isNotEmpty()
+
+    companion object {
+        val UNKNOWN = MediaStoreFingerprint(emptyMap())
+    }
+}
+
+/**
  * 通过 MediaStore 扫描设备上的本地音频，并汇总出文件夹列表。
  *
  * 不走文件系统遍历：一是 Android 10 以后分区存储不允许随便读目录，
@@ -16,6 +34,10 @@ import kotlinx.coroutines.withContext
 class MusicRepository(private val context: Context) {
 
     suspend fun loadSongs(): List<Song> = withContext(Dispatchers.IO) {
+        // 扫描和用户滚动在抢 CPU/IO。把这条线程降到后台优先级，
+        // 系统在调度时会优先保证 UI 线程的帧率（用户反馈"刚进 App 立刻拖列表卡"）。
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+
         val songs = ArrayList<Song>(256)
 
         // Android 10 起用相对路径（如 "Music/Albums/"）标识文件夹，
@@ -119,6 +141,45 @@ class MusicRepository(private val context: Context) {
         }
 
         songs
+    }
+
+    /**
+     * 读一次当前媒体库的指纹（FIX 5）。
+     *
+     * 为什么是"每个外部卷一份 version + generation"，而不是只取一个 generation：
+     *
+     *  - 我们的查询用的是 [MediaStore.Audio.Media.EXTERNAL_CONTENT_URI]，它是
+     *    `VOLUME_EXTERNAL` 这个**合并卷**，把当前挂载的所有外部存储（内置主存储
+     *    + 可能的 SD 卡）合在一起。而 `getGeneration` / `getVersion` 的 volumeName
+     *    必须是 `getExternalVolumeNames()` 返回的**具体卷名**，不能传合并卷名。
+     *    只盯 `VOLUME_EXTERNAL_PRIMARY` 的话，SD 卡上新增/删除的歌不会让主卷的
+     *    generation 变化，我们就会误判成"没变"而跳过扫描、永远看不到那些歌。
+     *    所以这里对每个具体卷都取一份。
+     *  - AOSP 在 `getGeneration` 的文档里明确写了：generation 在"整体 version 变化"
+     *    时可能被**重置**，比较前必须先确认 version 没变。所以 version 也一起存。
+     *
+     * 任何一步失败（平台不支持、MediaProvider 没起来、volume 无效）都返回
+     * [MediaStoreFingerprint.UNKNOWN]，调用方据此走普通扫描 —— 宁可多扫，不可漏歌。
+     */
+    suspend fun readFingerprint(): MediaStoreFingerprint = withContext(Dispatchers.IO) {
+        // minSdk 26：API 30 以下没有 generation，直接给哨兵，老设备行为不变
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            MediaStoreFingerprint.UNKNOWN
+        } else {
+            runCatching {
+                val volumeNames = MediaStore.getExternalVolumeNames(context)
+                if (volumeNames.isEmpty()) return@runCatching MediaStoreFingerprint.UNKNOWN
+
+                val stamps = HashMap<String, MediaStoreFingerprint.VolumeStamp>(volumeNames.size)
+                volumeNames.forEach { volumeName ->
+                    stamps[volumeName] = MediaStoreFingerprint.VolumeStamp(
+                        version = MediaStore.getVersion(context, volumeName),
+                        generation = MediaStore.getGeneration(context, volumeName),
+                    )
+                }
+                MediaStoreFingerprint(stamps)
+            }.getOrDefault(MediaStoreFingerprint.UNKNOWN)
+        }
     }
 
     /** MediaStore 对缺失的歌手/专辑会塞字面量 "<unknown>"，直接显示很难看，统一转成 null。 */

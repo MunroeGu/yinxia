@@ -25,6 +25,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.yinxia.music.R
+import com.yinxia.music.data.ArtworkLoader
 import com.yinxia.music.data.Song
 
 /**
@@ -71,7 +72,13 @@ fun MiniPlayer(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Artwork(song = song, modifier = Modifier.size(44.dp), cornerRadius = 10.dp)
+                // 44dp 的迷你条同样只需要小图
+                Artwork(
+                    song = song,
+                    modifier = Modifier.size(44.dp),
+                    cornerRadius = 10.dp,
+                    targetPx = ArtworkLoader.SMALL_PX,
+                )
                 Spacer(Modifier.width(12.dp))
 
                 Column(modifier = Modifier.weight(1f)) {

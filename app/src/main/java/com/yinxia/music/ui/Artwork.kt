@@ -31,21 +31,26 @@ import com.yinxia.music.ui.theme.gradientFor
 /**
  * 封面。尺寸完全交给调用方（modifier），这样列表、迷你条、播放页能共用一套逻辑。
  * 封面取不到时用与歌曲 id 绑定的渐变色 + 音符图标兜底，列表不会出现空洞。
+ *
+ * [targetPx] 是解码目标边长：列表/迷你条这类小尺寸传 [ArtworkLoader.SMALL_PX]，
+ * 播放页用默认的 [ArtworkLoader.LARGE_PX]。它同时参与 remember 的 key ——
+ * 一行被复用成另一种尺寸时必须重新取图，否则会拿小图去糊大图（或反过来）。
  */
 @Composable
 fun Artwork(
     song: Song?,
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 12.dp,
+    targetPx: Int = ArtworkLoader.LARGE_PX,
 ) {
     val context = LocalContext.current
-    var image: ImageBitmap? by remember(song?.id) {
-        mutableStateOf(ArtworkLoader.cached(song?.id ?: -1L))
+    var image: ImageBitmap? by remember(song?.id, targetPx) {
+        mutableStateOf(song?.let { ArtworkLoader.cached(it.id, targetPx) })
     }
 
-    LaunchedEffect(song?.id) {
+    LaunchedEffect(song?.id, targetPx) {
         if (song != null) {
-            image = ArtworkLoader.load(context, song)
+            image = ArtworkLoader.load(context, song, targetPx)
         }
     }
 
