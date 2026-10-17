@@ -27,7 +27,15 @@ object QueueRestore {
         if (songs.isEmpty()) return false
 
         val index = preferences.queueIndex.coerceIn(0, songs.lastIndex)
-        controller.setMediaItems(songs.map { it.toMediaItem() }, index, 0L)
+        // 从上次听到的位置接着放。夹进当前歌曲的时长里；时长未知（还没解析出来）时
+        // 只保证非负，多出来的部分播放器自己会夹掉。
+        val current = songs[index]
+        val position = if (current.durationMs > 0L) {
+            preferences.queuePositionMs.coerceIn(0L, current.durationMs)
+        } else {
+            preferences.queuePositionMs.coerceAtLeast(0L)
+        }
+        controller.setMediaItems(songs.map { it.toMediaItem() }, index, position)
         controller.prepare()
         return true
     }

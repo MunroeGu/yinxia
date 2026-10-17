@@ -2,6 +2,7 @@ package com.yinxia.music.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.media3.common.MediaItem
@@ -96,8 +97,33 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     // 自带作用域，不依赖 lifecycle-viewmodel-ktx，onCleared 里统一取消
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    /** 手动排序顺序，常驻内存免得每次重排都读一遍 SharedPreferences */
-    private var manualOrder: MutableList<Long> = preferences.manualOrder.toMutableList()
+    /**
+     * 每个作用域（「全部」/ 每个歌单）各自一份手动顺序，常驻内存免得每次重排都读一遍
+     * SharedPreferences。作用域字符串约定见 [manualOrderScope]。
+     */
+    private val manualOrders = HashMap<String, MutableList<Long>>()
+
+    /**
+     * 当前视图手动排序的作用域：看歌单时是 `playlist:<id>`，看全部时是 `library`。
+     * 手动顺序按作用域分开存，拖动某个歌单不会影响其他歌单和「全部」。
+     */
+    private val manualOrderScope: String
+        get() = _library.value.activePlaylistId?.let { "playlist:$it" } ?: "library"
+
+    /** 冷启动的播放恢复只做一次，成功或确认"无队列可恢复"后置位 */
+    private var playbackRestored = false
+
+    /**
+     * 上次把播放进度写进 SharedPreferences 的时刻（elapsedRealtime），用于节流。
+     * 进度每 500ms 刷新一次，不能每次都写盘。
+     */
+    private var lastPositionPersistAt = 0L
+
+    /** 上次落盘的位置；位置没变就不用再写一遍 */
+    private var lastPersistedPositionMs = -1L
+
+    /** 上次落盘时对应的歌曲 id；切歌时要强制写一次 */
+    private var lastPositionSongId = NO_SONG_ID
 
     /** 等待系统删除确认的歌曲，删除结果回来后要用 */
     private var pendingDeleteSongs: List<Song> = emptyList()
@@ -173,6 +199,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             controller.addListener(playerListener)
             syncPlayback()
             if (controller.isPlaying) startProgressUpdates()
+            // 恢复上次播放：控制器就绪这一刻缓存可能已经画好了，也可能还没有，
+            // 两条路都会试着恢复，playbackRestored 保证真正的恢复只发生一次。
+            scope.launch { restorePlaybackIfIdle() }
         }
     }
 
@@ -269,12 +298,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val playerDuration = controller.duration
         // 播放器还没解析出时长时，用扫描时拿到的时长兜底，进度条不会突然跳成 0
         val fallbackDuration = song?.durationMs ?: 0L
+        val positionMs = controller.currentPosition.coerceAtLeast(0L)
+        val isPlaying = controller.isPlaying
 
         _playback.update {
             it.copy(
                 currentSongId = currentSongId,
-                isPlaying = controller.isPlaying,
-                positionMs = controller.currentPosition.coerceAtLeast(0L),
+                isPlaying = isPlaying,
+                positionMs = positionMs,
                 durationMs = if (playerDuration > 0L) playerDuration else fallbackDuration,
                 shuffleEnabled = controller.shuffleModeEnabled,
                 repeatMode = controller.repeatMode,
@@ -282,9 +313,106 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
+        // 冷启动要靠它恢复进度；内部按 5 秒节流，不是每 tick 都写盘
+        persistPositionIfDue(
+            songId = currentSongId,
+            positionMs = positionMs,
+            isPlaying = isPlaying,
+            playbackState = controller.playbackState,
+        )
+
         // 桌面插件：内部会按"歌曲 + 播放状态"去重，
         // 所以每秒两次的进度刷新不会造成重复推送
-        PlayerWidget.push(getApplication(), song, controller.isPlaying)
+        PlayerWidget.push(getApplication(), song, isPlaying)
+    }
+
+    /**
+     * 把"听到第几毫秒"写进偏好设置，供冷启动恢复。
+     *
+     * 这个函数被 [syncPlayback] 调用，而 [syncPlayback] 在播放中每 500ms 跑一次，
+     * 每次都写盘太浪费（即使 SharedPreferences.apply 是异步的，也仍要序列化整份文件），
+     * 所以：
+     *  - **播放中**最多每 [POSITION_PERSIST_INTERVAL_MS]（5 秒）写一次；
+     *  - **切歌 / 暂停 / 停止 / 播完**不等节流窗口，立刻把当前进度钉住 ——
+     *    这几个时刻之后位置基本不再变，正是最需要准确的时候；
+     *  - 位置没变就不写：暂停后的事件风暴（[Player.Listener] 会连着回调几次）
+     *    不会反复落同一份数据；
+     *  - 队列为空（还没开始播 / 刚被清空）时直接不写：连接刚建立时
+     *    `controller.currentPosition` 是 0，写下去会把上次的进度覆盖掉。
+     */
+    private fun persistPositionIfDue(
+        songId: Long,
+        positionMs: Long,
+        isPlaying: Boolean,
+        playbackState: Int,
+    ) {
+        if (songId == NO_SONG_ID) return
+
+        val now = SystemClock.elapsedRealtime()
+        val itemChanged = songId != lastPositionSongId
+        // 暂停 / 停止 / 播完：进度不会再自己走，这一下必须写准
+        val settled = !isPlaying ||
+            playbackState == Player.STATE_ENDED ||
+            playbackState == Player.STATE_IDLE
+        val due = itemChanged || settled ||
+            now - lastPositionPersistAt >= POSITION_PERSIST_INTERVAL_MS
+        if (!due) return
+        if (!itemChanged && positionMs == lastPersistedPositionMs) return
+
+        preferences.queuePositionMs = positionMs
+        lastPersistedPositionMs = positionMs
+        lastPositionSongId = songId
+        lastPositionPersistAt = now
+    }
+
+    /**
+     * 冷启动把上次的播放队列、第几首、听到第几毫秒放回播放器，底部的迷你播放条
+     * 才会重新出现。
+     *
+     * 只跑一次，且只在两个条件都成立时跑：(a) 音乐库已经有内容（缓存或扫描），
+     * (b) 播放器的队列还是空的。任何一个条件没满足就**不置位地返回**，等下一次
+     * 调用再来 —— 恢复能力不能因为"调用得早"就丢掉。
+     *
+     * 刻意不调用 `play()`：恢复的是"上次听到哪"，不是"自动出声"。
+     */
+    private suspend fun restorePlaybackIfIdle() {
+        if (playbackRestored) return
+
+        // 库还没出来（缓存/扫描都还没到）时先不认输，等 allSongs 有了再恢复
+        if (_library.value.allSongs.isEmpty()) return
+
+        val controller = connection.controller ?: return
+
+        // 已经有队列：热启动（服务还活着），或者用户抢在恢复前点了歌 —— 都不能覆盖
+        if (controller.mediaItemCount > 0) {
+            playbackRestored = true
+            return
+        }
+
+        val ids = preferences.queueSongIds
+        if (ids.isEmpty()) {
+            playbackRestored = true
+            return
+        }
+
+        val byId = _library.value.allSongs.associateBy { it.id }
+        // 按存下来的顺序重建；已经不在库里的歌直接跳过
+        val songs = ids.mapNotNull { byId[it] }
+        if (songs.isEmpty()) {
+            playbackRestored = true
+            return
+        }
+
+        val index = preferences.queueIndex.coerceIn(0, songs.lastIndex)
+        val position = preferences.queuePositionMs.coerceAtLeast(0L)
+        controller.setMediaItems(songs.map { it.toMediaItem() }, index, position)
+        controller.prepare()
+        // 刚恢复的位置就是磁盘上那一份：记进节流记账里，恢复后紧接着的同步
+        // 不会把同一个位置再写一遍（也就不会因为播放器还没解析出位置而写成 0）。
+        lastPositionSongId = songs[index].id
+        lastPersistedPositionMs = position
+        lastPositionPersistAt = SystemClock.elapsedRealtime()
+        playbackRestored = true
     }
 
     // ------------------------------------------------------------ 音乐库
@@ -321,6 +449,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 _library.value.allSongs.isNotEmpty()
             ) {
                 _library.update { it.copy(loading = false) }
+                // 列表已经就位（缓存），但控制器可能是刚刚才连上的；补一次恢复尝试。
+                // 已经恢复过 / 已经有队列时它自己会立刻返回。
+                restorePlaybackIfIdle()
                 return@launch
             }
 
@@ -365,6 +496,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 recompute()
             }
+
+            // allSongs 已经（或一直）有内容：补一次播放恢复尝试。
+            // 缓存那条路可能跑在控制器就绪之前，这里是它的兜底。
+            restorePlaybackIfIdle()
 
             // 扫描成功才落盘。loadSongs() 在没权限 / MediaStore 异常时也返回空列表，
             // 那种"空"不是真的空库，写进去会把好不容易攒下的缓存清掉。
@@ -417,27 +552,52 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         recompute()
         // 指纹交给 loadLibrary：它据此决定这次要不要真的扫（FIX 5）
         cachedFingerprint = snapshot.fingerprint
+        // 缓存已经把 allSongs 填上了：控制器若已就绪，这里就把上次的播放恢复出来。
+        // 控制器还没连上时它会不置位地返回，connectPlayer 就绪后再补一次。
+        restorePlaybackIfIdle()
         return true
     }
 
+    /** 取某个作用域的手动顺序（第一次用到才从偏好里读），返回常驻内存的可变表 */
+    private fun manualOrderFor(scope: String): MutableList<Long> =
+        manualOrders.getOrPut(scope) { preferences.manualOrderFor(scope).toMutableList() }
+
+    /** 当前视图（「全部」或当前歌单）的手动顺序 */
+    private fun currentManualOrder(): MutableList<Long> = manualOrderFor(manualOrderScope)
+
     /**
-     * 让手动顺序覆盖到刚扫到的歌曲：新歌按名称追加在末尾，已删除的 id 清掉。
-     * 这样用户没手动排过的时候，手动模式也是一个合理的初始顺序。
+     * 让**当前作用域**的手动顺序覆盖到刚扫到的歌曲：新歌按名称追加在末尾，
+     * 已删除 / 已移出歌单的 id 清掉。这样用户没手动排过的时候，手动模式也是一个
+     * 合理的初始顺序。
+     *
+     * [all] 是整份媒体库；真正参与同步的只有当前视图看得见的那些歌：
+     * 「全部」作用域用整个媒体库，歌单作用域只维护歌单里那些歌 —— 否则每个歌单
+     * 都会存下全库的 id，既浪费空间，顺序也会被无关的歌带着走。
      */
     private fun syncManualOrder(all: List<Song>) {
-        val validIds = all.mapTo(HashSet()) { it.id }
-        val removed = manualOrder.removeAll { it !in validIds }
+        val state = _library.value
+        val scope = manualOrderScope
+        val playlistIds = state.activePlaylistId
+            ?.let { active -> state.playlists.firstOrNull { it.id == active }?.songIds }
+            ?.toHashSet()
+        val scoped = if (playlistIds == null) all else all.filter { it.id in playlistIds }
+        // 空歌单 / 还没扫描出结果时什么都不做，别把已有顺序清空
+        if (scoped.isEmpty()) return
 
-        val known = manualOrder.toHashSet()
-        val added = all.asSequence()
+        val order = manualOrderFor(scope)
+        val validIds = scoped.mapTo(HashSet()) { it.id }
+        val removed = order.removeAll { it !in validIds }
+
+        val known = order.toHashSet()
+        val added = scoped.asSequence()
             .filter { it.id !in known }
             // 同理不用 sortedBy { it.title.lowercase() }：每次比较一个字符串
             .sortedWith { a, b -> a.title.compareTo(b.title, ignoreCase = true) }
             .map { it.id }
             .toList()
-        if (added.isNotEmpty()) manualOrder.addAll(added)
+        if (added.isNotEmpty()) order.addAll(added)
 
-        if (removed || added.isNotEmpty()) preferences.manualOrder = manualOrder
+        if (removed || added.isNotEmpty()) preferences.setManualOrderFor(scope, order)
     }
 
     /**
@@ -515,7 +675,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             SortMode.MANUAL -> {
-                val orderIndex = manualOrder.withIndex().associate { (index, id) -> id to index }
+                // 手动顺序是每个视图各自一份的：全部 / 每个歌单互不影响
+                val orderIndex = currentManualOrder()
+                    .withIndex()
+                    .associate { (index, id) -> id to index }
                 filtered.sortedWith { a, b ->
                     val byOrder = (orderIndex[a.id] ?: Int.MAX_VALUE)
                         .compareTo(orderIndex[b.id] ?: Int.MAX_VALUE)
@@ -558,6 +721,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 只看某个歌单；传 null 表示看全部 */
     fun setActivePlaylist(playlistId: Long?) {
         _library.update { it.copy(activePlaylistId = playlistId) }
+        // 切到另一个作用域：它的顺序可能从来没排过（新歌单 / 第一次进），
+        // 这里先补齐并落盘，手动模式下才有可用的顺序；已经排过的歌单顺序原样保留。
+        syncManualOrder(_library.value.allSongs)
         recompute()
     }
 
@@ -610,21 +776,30 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun deletePlaylist(playlistId: Long) {
         val playlists = _library.value.playlists.filterNot { it.id == playlistId }
+        // 这个歌单自己的手动顺序一起丢掉：作用域是 "playlist:<id>"，删掉之后再也没有
+        // 任何视图会读它，留着只是 JSON 里的孤儿条目（也不会串到别的视图去）
+        forgetManualOrderForPlaylist(playlistId)
         // 正在看这个歌单时，删掉后自动退回"全部"
-        val stillActive = _library.value.activePlaylistId == playlistId
-        if (stillActive) {
-            preferences.playlists = playlists
-            _library.update { it.copy(playlists = playlists, activePlaylistId = null) }
-            recompute()
-            return
+        if (_library.value.activePlaylistId == playlistId) {
+            _library.update { it.copy(activePlaylistId = null) }
         }
+        // 统一走 applyPlaylists：落盘 + 更新状态 + 按新作用域补齐顺序 + 重算列表
         applyPlaylists(playlists)
     }
 
-    /** 歌单改动统一走这里：落盘 + 更新状态 + 重算列表 */
+    /** 删掉某个歌单的手动顺序（内存缓存 + 磁盘），不碰其他作用域 */
+    private fun forgetManualOrderForPlaylist(playlistId: Long) {
+        val scope = "playlist:$playlistId"
+        manualOrders.remove(scope)
+        preferences.setManualOrderFor(scope, emptyList())
+    }
+
+    /** 歌单改动统一走这里：落盘 + 更新状态 + 补齐当前作用域的手动顺序 + 重算列表 */
     private fun applyPlaylists(playlists: List<Playlist>) {
         preferences.playlists = playlists
         _library.update { it.copy(playlists = playlists) }
+        // 歌单内容变了：当前视图（很可能就是这个歌单）的手动顺序要跟着补新歌 / 删旧歌
+        syncManualOrder(_library.value.allSongs)
         recompute()
     }
 
@@ -671,19 +846,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         displayed.add(to, displayed.removeAt(from))
 
-        // 用"当前显示顺序 + 没显示出来的歌曲原顺序"重建整份手动顺序，
-        // 这样即使开着搜索或只扫描了部分文件夹，也不会把没显示的歌曲搞乱
+        // 用"当前显示顺序 + 没显示出来的歌曲原顺序"重建**当前作用域**的手动顺序，
+        // 这样即使开着搜索或只扫描了部分文件夹，也不会把没显示的歌曲搞乱；
+        // 也只动这个作用域 —— 其他歌单和「全部」的顺序一点不变。
+        val order = currentManualOrder()
         val displayedIds = displayed.mapTo(HashSet()) { it.id }
-        manualOrder = (
-            displayed.map { it.id } + manualOrder.filter { it !in displayedIds }
-            ).toMutableList()
+        val next = displayed.map { it.id } + order.filter { it !in displayedIds }
+        order.clear()
+        order.addAll(next)
 
         _library.update { it.copy(sortMode = SortMode.MANUAL, songs = displayed) }
     }
 
-    /** 把当前手动顺序写进 SharedPreferences */
+    /** 把当前作用域的手动顺序写进 SharedPreferences */
     fun commitManualOrder() {
-        preferences.manualOrder = manualOrder
+        preferences.setManualOrderFor(manualOrderScope, currentManualOrder())
         preferences.sortMode = SortMode.MANUAL
     }
 
@@ -825,6 +1002,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private companion object {
         const val PROGRESS_INTERVAL_MS = 500L
+
+        /**
+         * 播放进度落盘的最小间隔。
+         *
+         * [syncPlayback] 在播放中每 500ms 跑一次，每次都写 SharedPreferences 太浪费；
+         * 5 秒一次足以让冷启动恢复到"大致同一处"，而切歌/暂停/停止时另有立即写入，
+         * 那些才是真正需要精确的时刻。
+         */
+        const val POSITION_PERSIST_INTERVAL_MS = 5_000L
 
         /**
          * 缓存已经把列表画出来时，首次扫描推迟这么久才开始。

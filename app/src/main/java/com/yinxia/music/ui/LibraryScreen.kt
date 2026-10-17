@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Checkbox
@@ -60,11 +61,15 @@ import kotlinx.coroutines.isActive
  *  - 手动排序（[sorting] = true）：长按整行上下拖动排序。此模式行内不放任何图标，
  *    歌曲信息不会被遮挡；排完点顶部「完成」退出，列表恢复成普通形态。
  *
- * 拖动实现上有三个坑，这里都处理了：
+ * 拖动实现上有四个坑，这里都处理了：
  *  1. 用长按触发（[detectDragGesturesAfterLongPress]）。普通拖动会和列表滚动抢手势。
  *  2. 判定"跨过相邻行"必须用**下标**而不是 key：换位后被拖项的下标就等于目标下标，
  *     天然排除了"同一帧里反复换位"；如果用 key 做去重，往回拖时会被误判成重复而卡死。
  *  3. 拖到边缘要自动滚动，否则几百首的列表里没法长距离调整。
+ *  4. 被拖行的视觉位置必须由「手指位置」和「它当前的布局位置」**推导**，不能自己累加。
+ *     旧实现每帧无条件 `dragOffset += 滚动量`：列表滚到头、滚不动时，这段偏移没有任何东西
+ *     抵消它，每帧 10dp 一路累积，行就脱离手指飞出屏幕。改成推导后，滚不动时布局位置不变、
+ *     推导结果也就不变；而且每次都夹在列表可见范围内，行不可能被画到列表外面。
  */
 @Composable
 fun LibraryScreen(
@@ -85,16 +90,25 @@ fun LibraryScreen(
 ) {
     val listState = rememberLazyListState()
 
-    // 被拖动的行：key 用来发起移动，index 用来做位置判定 —— 两者都要
+    // 被拖动的行：key 用来在布局里定位它，index 用来判断它是不是已经排到首位/末位
     var draggingKey by remember { mutableStateOf<Long?>(null) }
     var draggingIndex by remember { mutableIntStateOf(-1) }
-    // 拖动行相对它当前布局位置的偏移
+    // 被拖行相对它**当前布局位置**的偏移。它只由 syncDragOffset() 推导，自己从不累加
     var dragOffset by remember { mutableFloatStateOf(0f) }
+    // 手指在列表坐标系里的绝对位置：只随手指真实移动变化，列表怎么滚它都不变
+    var dragPointerY by remember { mutableFloatStateOf(0f) }
+    // 落点在这一行内部的偏移，于是「行的视觉顶端 = dragPointerY - dragGrabY」
+    var dragGrabY by remember { mutableFloatStateOf(0f) }
     // 拖到边缘时的滚动速度，0 表示不滚
     var autoScrollSpeed by remember { mutableFloatStateOf(0f) }
+    // 上一次换位后这一行应该落在的下标；布局把它反映出来之前不再判定跨行，
+    // 否则同一批指针事件会把刚换过去的歌又换回来
+    var pendingIndex by remember { mutableIntStateOf(-1) }
 
     val currentOnMove = rememberUpdatedState(onMoveSong)
     val currentOnDragFinished = rememberUpdatedState(onDragFinished)
+    // 拖动中 songs 可能被换成新列表，而手势 lambda 是长驻的，条数必须读最新值
+    val currentSongCount = rememberUpdatedState(songs.size)
 
     val density = LocalDensity.current
     val edgeTriggerPx = with(density) { 72.dp.toPx() }
@@ -104,52 +118,131 @@ fun LibraryScreen(
         draggingKey = null
         draggingIndex = -1
         dragOffset = 0f
+        dragPointerY = 0f
+        dragGrabY = 0f
         autoScrollSpeed = 0f
+        pendingIndex = -1
+    }
+
+    /**
+     * 把被拖的行钉回手指下面，并夹进列表可见范围。返回它当前的布局信息，取不到（还没测量）时为 null。
+     *
+     * 这里是**推导**而不是累加，也是这次修复的核心：
+     *   视觉顶端 = 手指位置 - 抓取点（再夹到列表可见范围内）
+     *   偏移     = 视觉顶端 - 这一行当前的布局位置
+     * 列表自动滚动时，这一行自己的布局位置就会变，下一次推导自然把差值补回来；
+     * 列表滚不动（到顶/到底）时布局位置不再变化，推导结果也就固定下来，不会再跑。
+     * 旧实现每帧无条件 `dragOffset += 滚动量`，滚不动时没有任何东西抵消它，
+     * 于是一帧 10dp 地累积，行就离开手指飞出屏幕。
+     */
+    fun syncDragOffset(): LazyListItemInfo? {
+        val key = draggingKey ?: return null
+        val layout = listState.layoutInfo
+        val info = layout.visibleItemsInfo.firstOrNull { it.key == key } ?: return null
+        draggingIndex = info.index
+
+        // 以"首/末可见行"与"视口边界"取交集：行可以一直被推到第一行(最后一行)的槽位上，
+        // 但绝不会被画到列表可见内容之外
+        val first = layout.visibleItemsInfo.first()
+        val last = layout.visibleItemsInfo.last()
+        val minTop = maxOf(first.offset.toFloat(), layout.viewportStartOffset.toFloat())
+        val maxTop = minOf(
+            (last.offset + last.size - info.size).toFloat(),
+            (layout.viewportEndOffset - info.size).toFloat(),
+        )
+        val visualTop = (dragPointerY - dragGrabY)
+            .coerceIn(minTop, maxTop.coerceAtLeast(minTop))
+        dragOffset = visualTop - info.offset
+        return info
     }
 
     /**
      * 判定被拖动的行是否跨过了相邻行，跨过就换位。
      *
-     * 换位后必须同步修正 dragOffset，否则这一行的视觉位置会跳一下：
-     * 换位前它的布局位置是 info.offset，换位后变成 target.offset，
-     * 想让视觉位置不变，偏移就要补上两者的差。
+     * 换位之后视觉位置不需要手工补偿：下一次 [syncDragOffset] 会按这行新的槽位重新推导，
+     * 位置保持连续（旧实现要手动用 target.offset 修正，正是补偿写错的来源）。
      */
     fun evaluateCrossing() {
         val draggedKey = draggingKey ?: return
-        if (draggingIndex < 0) return
+        val info = syncDragOffset() ?: return
+
+        // 布局还没把上一次换位反映出来（这行仍停在旧下标）时先不判定：
+        // 这时行心还在同一个目标上，再换一次正好把刚换过去的歌换回来
+        if (pendingIndex >= 0) {
+            if (info.index != pendingIndex) return
+            pendingIndex = -1
+        }
 
         val layout = listState.layoutInfo
-        val info = layout.visibleItemsInfo.firstOrNull { it.index == draggingIndex } ?: return
-
         val visualTop = info.offset + dragOffset
         val visualCenter = visualTop + info.size / 2f
 
         val target = layout.visibleItemsInfo.firstOrNull { candidate ->
-            candidate.index != draggingIndex &&
+            candidate.key != draggedKey &&
                 visualCenter.toInt() in candidate.offset until (candidate.offset + candidate.size)
         } ?: return
 
         val targetKey = target.key as? Long ?: return
         currentOnMove.value(draggedKey, targetKey)
+        pendingIndex = target.index
+    }
 
-        // 换位后被拖项就落在目标的槽位上
-        dragOffset = visualTop - target.offset
-        draggingIndex = target.index
+    /**
+     * 根据被拖行的视觉位置决定这一帧要不要自动滚动。
+     *
+     * 已经排到第一位/最后一位，或者列表在这个方向上已经滚不动了，速度直接归零 ——
+     * 这时再滚只是空转（旧实现就是在这里空转，并且把行一路推离手指）。
+     */
+    fun updateAutoScroll(info: LazyListItemInfo) {
+        val layout = listState.layoutInfo
+        val visualTop = info.offset + dragOffset
+        val visualBottom = visualTop + info.size
+        val canScrollUp = draggingIndex > 0 && listState.canScrollBackward
+        val canScrollDown = draggingIndex < currentSongCount.value - 1 &&
+            listState.canScrollForward
+        autoScrollSpeed = when {
+            canScrollUp && visualTop < layout.viewportStartOffset + edgeTriggerPx ->
+                -autoScrollStepPx
+
+            canScrollDown && visualBottom > layout.viewportEndOffset - edgeTriggerPx ->
+                autoScrollStepPx
+
+            else -> 0f
+        }
     }
 
     // 拖到边缘时自动滚动：没有这个，长列表里只能在小范围内调整顺序
     LaunchedEffect(draggingKey) {
         if (draggingKey == null) return@LaunchedEffect
         while (isActive) {
-            val delta = autoScrollSpeed
-            if (delta != 0f) {
-                listState.scrollBy(delta)
-                // 列表滚了 delta，所有行的布局位置都后退 delta，
-                // 偏移同步加回来，被拖的行才会继续贴着手指
-                dragOffset += delta
-                evaluateCrossing()
-            }
             delay(16)
+
+            // 不需要自动滚动时什么都不做：不读布局、不滚列表，更不会空转
+            if (autoScrollSpeed == 0f) continue
+
+            val info = syncDragOffset()
+            if (info == null) {
+                autoScrollSpeed = 0f
+                continue
+            }
+            updateAutoScroll(info)
+
+            val delta = autoScrollSpeed
+            if (delta == 0f) continue
+            // 列表在这个方向已经滚不动了（到顶/到底）就别再动它：
+            // 偏移是推导出来的，不会再出现"滚动没发生、偏移却还在累加"的情况
+            if (delta < 0f && !listState.canScrollBackward) {
+                autoScrollSpeed = 0f
+                continue
+            }
+            if (delta > 0f && !listState.canScrollForward) {
+                autoScrollSpeed = 0f
+                continue
+            }
+            listState.scrollBy(delta)
+            // 列表滚了，行自身的布局位置跟着变，重新推导一次偏移，行就还贴在手指下面
+            syncDragOffset()
+            evaluateCrossing()
         }
     }
 
@@ -176,15 +269,20 @@ fun LibraryScreen(
                 dragModifier = if (sorting) {
                     Modifier.pointerInput(song.id) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = {
-                                // 起点下标从当前布局里取，避免用到过期下标
-                                draggingIndex = listState.layoutInfo.visibleItemsInfo
+                            onDragStart = { offset ->
+                                // 起点下标和布局位置都从当前布局里取，避免用到过期下标
+                                val info = listState.layoutInfo.visibleItemsInfo
                                     .firstOrNull { it.key == song.id }
-                                    ?.index
-                                    ?: -1
-                                draggingKey = song.id
-                                dragOffset = 0f
-                                autoScrollSpeed = 0f
+                                if (info != null) {
+                                    draggingKey = song.id
+                                    draggingIndex = info.index
+                                    // 手指在列表坐标系里的位置 = 这一行当前的布局位置 + 落点偏移
+                                    dragPointerY = info.offset + offset.y
+                                    dragGrabY = offset.y
+                                    dragOffset = 0f
+                                    autoScrollSpeed = 0f
+                                    pendingIndex = -1
+                                }
                             },
                             onDragEnd = {
                                 resetDrag()
@@ -196,26 +294,14 @@ fun LibraryScreen(
                             },
                             onDrag = { change, amount ->
                                 change.consume()
-                                dragOffset += amount.y
-
-                                val layout = listState.layoutInfo
-                                val info = layout.visibleItemsInfo
-                                    .firstOrNull { it.index == draggingIndex }
+                                // 只累加手指自己的位移（即手指在列表坐标系里的真实位置）；
+                                // 列表滚动带来的差值由 syncDragOffset() 通过布局位置抵消
+                                dragPointerY += amount.y
+                                val info = syncDragOffset()
                                 if (info != null) {
-                                    val top = info.offset + dragOffset
-                                    val bottom = top + info.size
-                                    autoScrollSpeed = when {
-                                        top < layout.viewportStartOffset + edgeTriggerPx ->
-                                            -autoScrollStepPx
-
-                                        bottom > layout.viewportEndOffset - edgeTriggerPx ->
-                                            autoScrollStepPx
-
-                                        else -> 0f
-                                    }
+                                    updateAutoScroll(info)
+                                    evaluateCrossing()
                                 }
-
-                                evaluateCrossing()
                             },
                         )
                     }
